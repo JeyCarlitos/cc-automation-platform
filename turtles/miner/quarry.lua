@@ -187,6 +187,7 @@ local function returnToOriginColumn()
     local function navigateAxis(getVal, posDir, negDir)
         local climbed = 0
         while getVal() ~= 0 do
+            sleep(0)  -- yield: turtle.inspect no hace yield por sí solo
             local targetDir = getVal() > 0 and posDir or negDir
             Movement.faceDir(targetDir)
             local kind = classifyBlock(turtle.inspect)
@@ -215,6 +216,48 @@ local function returnToOriginColumn()
     -- Corregir X primero, luego Z
     navigateAxis(function() return Movement.getPos().x end, "west", "east")
     navigateAxis(function() return Movement.getPos().z end, "north", "south")
+end
+
+-- ============================================================
+-- API pública: Quarry.descendToLayer
+--
+-- Desciende desde la posición actual hasta el nivel absoluto de targetLayer.
+--   targetLayer 0 → y = -(START_OFFSET_DOWN)
+--   targetLayer N → y = -(START_OFFSET_DOWN + N * LAYER_HEIGHT)
+--
+-- Funciona tanto si la turtle está en y=0 (tras RETURN_AFTER_EACH_LAYER)
+-- como si está en la capa anterior (sin retorno).
+--
+-- Retorna: "OK" | "BEDROCK"
+-- ============================================================
+
+function Quarry.descendToLayer(session, targetLayer)
+    local targetY = -(Config.START_OFFSET_DOWN + targetLayer * Config.LAYER_HEIGHT)
+    Logger.info(string.format(
+        "Bajando a capa %d (y=%d) desde y=%d",
+        targetLayer, targetY, Movement.getPos().y
+    ))
+
+    while Movement.getPos().y > targetY do
+        sleep(0)  -- yield: turtle.inspectDown no hace yield por sí solo
+
+        local kind = classifyBlock(turtle.inspectDown)
+        if kind == "unbreakable" then
+            Logger.info(string.format(
+                "Bloque irrompible al bajar a capa %d en y=%d",
+                targetLayer, Movement.getPos().y - 1
+            ))
+            return "BEDROCK"
+        end
+
+        if not safeDigDown(session) then
+            Logger.warn("No se pudo bajar al intentar llegar a capa " .. targetLayer)
+            return "BEDROCK"  -- tratar como fin del quarry
+        end
+    end
+
+    Logger.debug(string.format("En capa %d (y=%d)", targetLayer, Movement.getPos().y))
+    return "OK"
 end
 
 -- ============================================================
@@ -288,6 +331,7 @@ function Quarry.mineLayer(session)
         -- Minar los bloques de la fila
         local col = colStart
         while (colStep == 1 and col <= colEnd) or (colStep == -1 and col >= colEnd) do
+            sleep(0)  -- yield de seguridad por iteración
             session.currentColumn = col
 
             -- Verificar fuel e inventario antes de cada paso
@@ -365,35 +409,6 @@ function Quarry.mineLayer(session)
 
     Logger.info(string.format("Capa %d completada", session.currentLayer))
     return "COMPLETE"
-end
-
--- ============================================================
--- API pública: Quarry.descendOneLayer
---
--- Baja LAYER_HEIGHT bloques desde la posición actual (columna origen).
--- Retorna:
---   "OK"      — bajó correctamente
---   "BEDROCK" — detectó bedrock debajo, no bajó
--- ============================================================
-
-function Quarry.descendOneLayer(session)
-    local kind = classifyBlock(turtle.inspectDown)
-    if kind == "unbreakable" then
-        Logger.info("Bedrock detectado debajo: quarry terminado")
-        return "BEDROCK"
-    end
-
-    for _ = 1, Config.LAYER_HEIGHT do
-        if not safeDigDown(session) then
-            -- Puede ser lava sellada o bloque temporal; intentar una vez más
-            if not safeDigDown(session) then
-                Logger.warn("No se pudo bajar a la siguiente capa")
-                return "BEDROCK"   -- tratamos como fin seguro
-            end
-        end
-    end
-
-    return "OK"
 end
 
 return Quarry

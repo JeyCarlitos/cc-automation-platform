@@ -67,7 +67,8 @@ local function snapshot(phase)
     }
 end
 
--- Sube hasta y == 0 excavando lo necesario (el pozo ya está despejado).
+-- Sube hasta y == 0.
+-- El pozo (x=0,z=0) está despejado; simplemente sube.
 local function ascendToBase()
     Logger.info(string.format(
         "Subiendo a base desde y=%d (x=%d z=%d)",
@@ -75,10 +76,10 @@ local function ascendToBase()
     ))
     local stuckCount = 0
     while Movement.getPos().y < 0 do
+        sleep(0)  -- yield: turtle.inspectUp no hace yield por sí solo
         local hasBlock, data = turtle.inspectUp()
         if hasBlock then
             if data and isUnbreakableLocal(data.name) then
-                -- Bedrock en techo: intentar escape lateral
                 Logger.warn("Techo irrompible al subir — buscando escape lateral")
                 local escaped = false
                 for _ = 1, 4 do
@@ -107,18 +108,19 @@ local function ascendToBase()
     Logger.info("En Y=0")
 end
 
--- Sube a base orientándose al cofre y descarga todo.
+-- Navega a {x=0, z=0} en el nivel actual, luego sube a y=0.
 local function returnToBase()
-    -- 1. Navegar al origen de la columna (x=0, z=0) en el nivel actual.
-    --    Usamos la misma lógica que quarry.lua pero aquí en miner para
-    --    no re-requerir quarry (que tiene esa función local).
-    --    En cambio, simplemente subimos primero (el pozo está despejado).
+    Logger.info(string.format(
+        "Regresando a base desde x=%d y=%d z=%d",
+        Movement.getPos().x, Movement.getPos().y, Movement.getPos().z
+    ))
 
-    -- Subir hasta Y=0
+    -- 1. Subir primero: el pozo central siempre está despejado
     ascendToBase()
 
-    -- Ajustar X
+    -- 2. Ajustar X y Z (a nivel y=0, sin obstáculos normales)
     local function digAndMove(dir)
+        sleep(0)
         Movement.faceDir(dir)
         if turtle.detect() then turtle.dig() end
         Movement.forward()
@@ -133,7 +135,7 @@ local function returnToBase()
     Logger.info("Turtle en base {0,0,0}")
 end
 
--- Descargar inventario y reabastecer fuel.
+-- Descarga el inventario y recarga combustible.
 local function unloadAndRefuel()
     Logger.info("Descargando inventario (" .. Config.CHEST_DIRECTION .. ")")
 
@@ -144,7 +146,7 @@ local function unloadAndRefuel()
         Movement.faceDir("west")
     elseif chest == "right" then
         Movement.faceDir("east")
-    elseif chest == "front" then
+    else  -- "front"
         Movement.faceDir("north")
     end
 
@@ -154,57 +156,24 @@ local function unloadAndRefuel()
     Logger.info("Descarga completa. Fuel: " .. Fuel.getLevel())
 end
 
--- Baja desde y=0 hasta la Y objetivo (columna del pozo despejada).
-local function descendToY(targetY)
-    Logger.info(string.format("Bajando a y=%d desde y=%d", targetY, Movement.getPos().y))
-    Movement.faceDir("north")
-    while Movement.getPos().y > targetY do
-        if turtle.detectDown() then turtle.digDown() end
-        Movement.down()
-    end
-    Logger.info("Llegué a y=" .. Movement.getPos().y)
-end
-
--- Moverse desde x=0,z=0 hasta workPosition.x, workPosition.z en el nivel actual.
+-- Navega desde x=0,z=0 hasta workPosition.x, workPosition.z en el nivel actual.
 local function travelToWorkXZ(wp)
-    local function moveAxis(targetVal, posDir, negDir)
-        while Movement.getPos().x ~= wp.x or Movement.getPos().z ~= wp.z do
-            local cur
-            if posDir == "east" or posDir == "west" then
-                cur = Movement.getPos().x
-            else
-                cur = Movement.getPos().z
-            end
-            if cur == targetVal then return end
-            local d = (cur < targetVal) and posDir or negDir
-            Movement.faceDir(d)
-            if turtle.detect() then turtle.dig() end
-            Movement.forward()
-        end
-    end
-
     -- Corregir X
-    local cx = Movement.getPos().x
-    if cx ~= wp.x then
-        Movement.faceDir(cx < wp.x and "east" or "west")
-        while Movement.getPos().x ~= wp.x do
-            if turtle.detect() then turtle.dig() end
-            Movement.forward()
-        end
+    while Movement.getPos().x ~= wp.x do
+        sleep(0)
+        Movement.faceDir(Movement.getPos().x < wp.x and "east" or "west")
+        if turtle.detect() then turtle.dig() end
+        Movement.forward()
     end
-
     -- Corregir Z
-    local cz = Movement.getPos().z
-    if cz ~= wp.z then
-        Movement.faceDir(cz < wp.z and "south" or "north")
-        while Movement.getPos().z ~= wp.z do
-            if turtle.detect() then turtle.dig() end
-            Movement.forward()
-        end
+    while Movement.getPos().z ~= wp.z do
+        sleep(0)
+        Movement.faceDir(Movement.getPos().z < wp.z and "south" or "north")
+        if turtle.detect() then turtle.dig() end
+        Movement.forward()
     end
-
     Movement.faceDir(wp.dir)
-    Logger.info(string.format("Posición de trabajo restaurada x=%d y=%d z=%d dir=%s",
+    Logger.info(string.format("Posicion restaurada x=%d y=%d z=%d dir=%s",
         wp.x, wp.y, wp.z, wp.dir))
 end
 
@@ -326,39 +295,32 @@ function Miner.run()
     -- ============================================================
 
     if phase == "RETURNING_TO_WORK" then
-        -- Ya estamos en base; bajar y reposicionarse
+        -- Bajar al nivel correcto y reposicionarse
+        Quarry.descendToLayer(session, session.currentLayer)
         if session.workPosition then
-            local wp = session.workPosition
-            descendToY(wp.y)
-            travelToWorkXZ(wp)
+            travelToWorkXZ(session.workPosition)
         end
         phase = "MINING_LAYER"
         session.phase = phase
 
     elseif phase == "DESCENDING_TO_START" then
-        -- Bajar el offset inicial
-        local targetY = -Config.START_OFFSET_DOWN
-        if Movement.getPos().y > targetY then
-            descendToY(targetY)
-        end
-        session.phase = "MINING_LAYER"
-        phase = "MINING_LAYER"
+        -- El bucle principal maneja esta fase
+        -- (no hacer nada aquí, dejar que entre al while)
 
     elseif phase == "DESCENDING_NEXT_LAYER" then
-        -- Bajar una capa desde el nivel actual
-        local result = Quarry.descendOneLayer(session)
+        local nextLayer = session.currentLayer + 1
+        local result = Quarry.descendToLayer(session, nextLayer)
         if result == "BEDROCK" then
-            -- Terminar: volver a base
             State.save(snapshot("RETURNING_TO_BASE"))
             session.returningReason = "LAYER_COMPLETE"
             returnToBase()
             unloadAndRefuel()
             State.clear()
             Logger.info("=== Quarry finalizado por bedrock al reanudar ===")
-            print("Quarry completo! Bloque irrompible encontrado al bajar.")
+            print("Quarry completo! Bedrock encontrado.")
             return
         end
-        session.currentLayer    = session.currentLayer + 1
+        session.currentLayer    = nextLayer
         session.currentRow      = 0
         session.currentColumn   = 0
         session.phase = "MINING_LAYER"
@@ -375,13 +337,18 @@ function Miner.run()
         -- ── DESCENDING_TO_START ────────────────────────────────
         if phase == "DESCENDING_TO_START" then
             State.save(snapshot("DESCENDING_TO_START"))
-            local targetY = -Config.START_OFFSET_DOWN
-            if Movement.getPos().y > targetY then
-                descendToY(targetY)
+            -- Desciende a la Y absoluta de la capa 0: y = -(START_OFFSET_DOWN)
+            local result = Quarry.descendToLayer(session, 0)
+            if result == "BEDROCK" then
+                Logger.warn("Bedrock al bajar al offset inicial. Terminando.")
+                returnToBase()
+                unloadAndRefuel()
+                phase = "COMPLETE"
+            else
+                session.currentLayer = 0
+                session.phase = "MINING_LAYER"
+                phase = "MINING_LAYER"
             end
-            session.currentLayer = 0
-            session.phase = "MINING_LAYER"
-            phase = "MINING_LAYER"
 
         -- ── MINING_LAYER ───────────────────────────────────────
         elseif phase == "MINING_LAYER" then
@@ -413,7 +380,8 @@ function Miner.run()
                 State.save(snapshot("RETURNING_TO_WORK"))
                 if session.workPosition then
                     local wp = session.workPosition
-                    descendToY(wp.y)
+                    -- Usar descendToLayer para llegar a la Y correcta con detección de bedrock
+                    Quarry.descendToLayer(session, session.currentLayer)
                     travelToWorkXZ(wp)
                 end
                 session.phase = "MINING_LAYER"
@@ -439,11 +407,14 @@ function Miner.run()
 
         -- ── DESCENDING_NEXT_LAYER ──────────────────────────────
         elseif phase == "DESCENDING_NEXT_LAYER" then
-            local result = Quarry.descendOneLayer(session)
+            -- La siguiente capa tiene un Y absoluto basado en su número.
+            -- Esto funciona tanto si la turtle está en y=0 (RETURN_AFTER_EACH_LAYER)
+            -- como si está en la capa anterior (sin retorno).
+            local nextLayer = session.currentLayer + 1
+            local result = Quarry.descendToLayer(session, nextLayer)
 
             if result == "BEDROCK" then
                 Logger.info("Bedrock encontrado: quarry terminado")
-                -- Último retorno a base
                 session.returningReason = "LAYER_COMPLETE"
                 session.phase = "RETURNING_TO_BASE"
                 State.save(snapshot("RETURNING_TO_BASE"))
@@ -451,13 +422,13 @@ function Miner.run()
                 unloadAndRefuel()
                 phase = "COMPLETE"
             else
-                session.currentLayer    = session.currentLayer + 1
+                session.currentLayer    = nextLayer
                 session.currentRow      = 0
                 session.currentColumn   = 0
                 session.workPosition    = nil
                 session.phase = "MINING_LAYER"
                 phase = "MINING_LAYER"
-                Logger.info(string.format("Bajé a capa %d", session.currentLayer))
+                Logger.info(string.format("En capa %d", nextLayer))
             end
 
         else

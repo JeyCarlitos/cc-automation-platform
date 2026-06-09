@@ -1,25 +1,15 @@
 -- turtles/miner/quarry.lua
--- Algoritmo de Quarry: pozo vertical + excavación capa por capa.
+-- Quarry: pozo vertical + excavación capa por capa con manejo de lava.
 --
--- Fase 1 – SHAFT:
---   Excava un pozo de SHAFT_DEPTH bloques en línea recta hacia abajo.
+-- Cuando detecta lava en cualquier dirección:
+--   1. Busca un bloque sólido en el inventario (cobblestone, piedra, dirt…)
+--   2. Lo coloca donde estaba la lava (la reemplaza)
+--   3. Excava el bloque colocado y continúa normalmente
+--   4. Reintenta hasta 3 veces por si la lava fluye de nuevo
 --
--- Fase 2 – LAYERS:
---   Desde el fondo del pozo, mina una capa QUARRY_WIDTH x QUARRY_LENGTH
---   en patrón serpentín y luego sube a la siguiente capa.
---   Repite hasta cubrir los SHAFT_DEPTH niveles de abajo hacia arriba.
---
--- Patrón serpentín por capa (con 16x16 como ejemplo):
---
---   (0,0) → → → → → → → (15,0)
---                              ↓
---   (0,1) ← ← ← ← ← ← ← (15,1)
---     ↓
---   (0,2) → → → → → → → (15,2)
---   ...
---
--- Cada fila también excava el bloque de arriba (digUp) para dejar
--- el área completamente limpia.
+-- Requisito: tener al menos algunos bloques sólidos en el inventario
+-- (cobblestone, dirt, etc.) antes de iniciar en zonas con lava.
+-- La propia turtle acumula cobblestone mientras mina.
 
 local Config    = require("config.config")
 local Logger    = require("core.logger")
@@ -31,38 +21,171 @@ local State     = require("turtles.miner.state")
 local Quarry = {}
 
 -- ============================================================
--- Helper: volver a la columna del pozo (x=0, z=0) en el nivel actual
+-- Helpers: detección y sellado de lava
+-- ============================================================
+
+local function isLava(name)
+    return name ~= nil and (name == "minecraft:lava" or name:find("lava") ~= nil)
+end
+
+-- Busca un bloque sólido en el inventario para sellar lava.
+-- Prefiere cobblestone/stone/dirt. Si no hay, usa cualquier no-combustible.
+local function findSealingSlot()
+    local preferred = { "cobblestone", "stone", "dirt", "gravel", "netherrack", "deepslate" }
+
+    for slot = 1, 16 do
+        if turtle.getItemCount(slot) > 0 then
+            local d = turtle.getItemDetail(slot)
+            if d then
+                for _, p in ipairs(preferred) do
+                    if d.name:find(p) then return slot end
+                end
+            end
+        end
+    end
+
+    -- Segunda pasada: cualquier bloque que no sea combustible
+    for slot = 1, 16 do
+        if turtle.getItemCount(slot) > 0 then
+            turtle.select(slot)
+            if not turtle.refuel(0) then
+                turtle.select(1)
+                return slot
+            end
+        end
+    end
+
+    turtle.select(1)
+    return nil
+end
+
+-- Sella lava en una dirección colocando un bloque sólido.
+-- Reintenta hasta 3 veces (lava puede fluir de vuelta).
+-- Retorna true si la dirección está segura para proceder.
+local function sealLava(inspectFn, placeFn, dirName)
+    for attempt = 1, 3 do
+        local hasBlock, data = inspectFn()
+        if not hasBlock or not isLava(data.name) then
+            return true  -- sin lava, seguro
+        end
+
+        Logger.warn(string.format("Lava en %s (intento %d/3)", dirName, attempt))
+
+        local slot = findSealingSlot()
+        if not slot then
+            Logger.error("Sin bloques para sellar lava en " .. dirName)
+            return false
+        end
+
+        turtle.select(slot)
+        if not placeFn() then
+            Logger.warn("No se pudo colocar bloque en " .. dirName)
+        end
+        turtle.select(1)
+        sleep(0.5)  -- esperar a que la lava adyacente fluya y se estabilice
+    end
+
+    -- Verificación final
+    local hasBlock, data = inspectFn()
+    if hasBlock and isLava(data.name) then
+        Logger.error("No se pudo sellar lava en " .. dirName .. " tras 3 intentos")
+        return false
+    end
+
+    Logger.info("Lava sellada en " .. dirName)
+    return true
+end
+
+-- ============================================================
+-- Wrappers de excavación seguros contra lava
+-- ============================================================
+
+-- Sella lava si hay, luego excava y avanza.
+local function safeDigForward(sessionData)
+    sealLava(turtle.inspect, turtle.place, "frente")
+    if Movement.digForward() then
+        if sessionData then
+            sessionData.moveCount = (sessionData.moveCount or 0) + 1
+        end
+        return true
+    end
+    return false
+end
+
+-- Sella lava si hay, luego excava y baja.
+local function safeDigDown(sessionData)
+    if not sealLava(turtle.inspectDown, turtle.placeDown, "abajo") then
+        return false
+    end
+    if Movement.digDown() then
+        if sessionData then
+            sessionData.moveCount = (sessionData.moveCount or 0) + 1
+        end
+        return true
+    end
+    return false
+end
+
+-- Sella lava en el techo si hay, luego excava hacia arriba.
+-- Si no se puede sellar, deja el techo sin excavar (seguridad > cobertura).
+local function safeDigUp()
+    local hasBlock, data = turtle.inspectUp()
+    if hasBlock and isLava(data.name) then
+        Logger.warn("Lava en techo - sellando")
+        local slot = findSealingSlot()
+        if slot then
+            turtle.select(slot)
+            if turtle.placeUp() then
+                turtle.select(1)
+                sleep(0.3)
+                -- Ahora el techo es un bloque sólido, excavar normalmente
+                turtle.digUp()
+                return
+            end
+            turtle.select(1)
+        end
+        Logger.warn("No se pudo sellar techo con lava - dejando")
+        return
+    end
+    -- Sin lava: excavar normalmente
+    turtle.digUp()
+end
+
+-- ============================================================
+-- Helper: volver a columna del pozo (x=0, z=0)
 -- ============================================================
 
 local function returnToShaftColumn()
     local p = Movement.getPos()
 
-    -- Corregir X
     if p.x > 0 then
         Movement.faceDir("west")
         while Movement.getPos().x > 0 do
+            sealLava(turtle.inspect, turtle.place, "frente")
             if turtle.detect() then turtle.dig() end
             Movement.forward()
         end
     elseif p.x < 0 then
         Movement.faceDir("east")
         while Movement.getPos().x < 0 do
+            sealLava(turtle.inspect, turtle.place, "frente")
             if turtle.detect() then turtle.dig() end
             Movement.forward()
         end
     end
 
-    -- Corregir Z
     p = Movement.getPos()
     if p.z > 0 then
         Movement.faceDir("north")
         while Movement.getPos().z > 0 do
+            sealLava(turtle.inspect, turtle.place, "frente")
             if turtle.detect() then turtle.dig() end
             Movement.forward()
         end
     elseif p.z < 0 then
         Movement.faceDir("south")
         while Movement.getPos().z < 0 do
+            sealLava(turtle.inspect, turtle.place, "frente")
             if turtle.detect() then turtle.dig() end
             Movement.forward()
         end
@@ -80,9 +203,8 @@ function Quarry.digShaft(sessionData)
     Logger.info(string.format("Pozo: %d/%d bloques", dug, depth))
 
     for i = dug + 1, depth do
-        -- Fuel: necesitamos bajar lo que falta y luego subir todo de vuelta
         if not Fuel.hasSufficient((depth - i + 1) + depth) then
-            Logger.warn("Fuel insuficiente para continuar el pozo en bloque " .. i)
+            Logger.warn("Fuel insuficiente en pozo bloque " .. i)
             sessionData.shaftDug = i - 1
             return "FUEL"
         end
@@ -93,22 +215,14 @@ function Quarry.digShaft(sessionData)
             return "INVENTORY"
         end
 
-        -- Excavar hacia abajo (maneja grava/arena que cae)
-        local digs = 0
-        while turtle.detectDown() and digs < 10 do
-            turtle.digDown()
-            sleep(0.3)
-            digs = digs + 1
-        end
-
-        if not Movement.down() then
-            Logger.warn("Bloqueado en pozo bloque " .. i)
+        -- Excavar con protección contra lava y grava/arena
+        if not safeDigDown(sessionData) then
+            -- safeDigDown ya loggeó el error
             sessionData.shaftDug = i - 1
             return "BLOCKED"
         end
 
-        sessionData.shaftDug  = i
-        sessionData.moveCount = (sessionData.moveCount or 0) + 1
+        sessionData.shaftDug = i
         State.checkpoint(sessionData)
     end
 
@@ -117,24 +231,18 @@ function Quarry.digShaft(sessionData)
 end
 
 -- ============================================================
--- Phase 2: Una capa del quarry (serpentín 16x16)
+-- Phase 2: Una capa del quarry (serpentín seguro contra lava)
 -- ============================================================
 
--- Mina una capa completa y regresa a la columna del pozo (x=0, z=0).
--- La turtle debe estar en (x=0, z=0) de la capa al llamar esta función.
--- Retorna "COMPLETE", "FUEL" o "INVENTORY".
 local function mineLayer(layerNum, sessionData)
-    local width  = Config.QUARRY_WIDTH   -- número de filas (eje Z)
-    local length = Config.QUARRY_LENGTH  -- bloques por fila (eje X)
+    local width  = Config.QUARRY_WIDTH
+    local length = Config.QUARRY_LENGTH
 
     Logger.info(string.format("Capa %d/%d", layerNum + 1, Config.SHAFT_DEPTH))
 
-    -- Comenzar mirando hacia el este (fila 0 va en dirección +X)
     Movement.faceDir("east")
 
     for row = 0, width - 1 do
-
-        -- Verificar condiciones al inicio de cada fila
         if not Fuel.hasSufficient((width - row) * length + width + 20) then
             Logger.warn("Fuel bajo en capa " .. layerNum .. " fila " .. row)
             returnToShaftColumn()
@@ -148,38 +256,34 @@ local function mineLayer(layerNum, sessionData)
             return "INVENTORY"
         end
 
-        -- Minar la fila (length - 1 pasos: el primer bloque ya es la columna del pozo o el bloque anterior)
+        -- Minar la fila
         for col = 0, length - 2 do
-            turtle.digUp()        -- limpiar bloque del techo
-            Movement.digForward() -- excavar y avanzar
-            sessionData.moveCount = (sessionData.moveCount or 0) + 1
+            safeDigUp()
+            safeDigForward(sessionData)
         end
-        turtle.digUp()  -- techo del último bloque de la fila
+        safeDigUp()  -- techo del último bloque
 
-        -- Paso al siguiente row (si no es el último)
+        -- Paso al siguiente row
         if row < width - 1 then
             if row % 2 == 0 then
-                -- Fila par → mirando este → girar al sur, avanzar 1, girar al oeste
+                -- Mirando este → sur, avanzar 1, oeste
                 Movement.turnRight()
-                turtle.digUp()
-                Movement.digForward()
+                safeDigUp()
+                safeDigForward(sessionData)
                 Movement.turnRight()
             else
-                -- Fila impar → mirando oeste → girar al sur, avanzar 1, girar al este
+                -- Mirando oeste → sur, avanzar 1, este
                 Movement.turnLeft()
-                turtle.digUp()
-                Movement.digForward()
+                safeDigUp()
+                safeDigForward(sessionData)
                 Movement.turnLeft()
             end
-            sessionData.moveCount = (sessionData.moveCount or 0) + 2
         end
 
         State.checkpoint(sessionData)
     end
 
-    -- Regresar a la columna del pozo (x=0, z=0)
     returnToShaftColumn()
-
     Logger.debug("Capa " .. layerNum .. " completada")
     return "COMPLETE"
 end
@@ -208,11 +312,9 @@ function Quarry.run(sessionData)
 
         local reason = mineLayer(layer, sessionData)
         if reason ~= "COMPLETE" then
-            -- mineLayer ya hizo returnToShaftColumn antes de retornar
             return reason
         end
 
-        -- Subir a la siguiente capa (si no es la última)
         if layer < depth - 1 then
             Movement.up()
             sessionData.moveCount = (sessionData.moveCount or 0) + 1

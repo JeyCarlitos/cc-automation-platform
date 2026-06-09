@@ -1,15 +1,15 @@
 -- turtles/miner/quarry.lua
--- Quarry: pozo vertical + excavación capa por capa con manejo de lava.
+-- Chunk Quarry Vertical — lógica de excavación por capa.
 --
--- Cuando detecta lava en cualquier dirección:
---   1. Busca un bloque sólido en el inventario (cobblestone, piedra, dirt…)
---   2. Lo coloca donde estaba la lava (la reemplaza)
---   3. Excava el bloque colocado y continúa normalmente
---   4. Reintenta hasta 3 veces por si la lava fluye de nuevo
+-- Responsabilidades:
+--   • Excavar una capa 16×16 en patrón serpentín.
+--   • Reanudar desde currentRow/currentColumn tras un retorno.
+--   • Bajar un bloque entre capas y detectar bedrock.
+--   • Manejar lava y bloques irrompibles.
+--   • Retornar señales al orquestador (miner.lua) para FUEL_LOW,
+--     INVENTORY_FULL y LAYER_COMPLETE.
 --
--- Requisito: tener al menos algunos bloques sólidos en el inventario
--- (cobblestone, dirt, etc.) antes de iniciar en zonas con lava.
--- La propia turtle acumula cobblestone mientras mina.
+-- REGLA: todo movimiento pasa por movement.lua.
 
 local Config    = require("config.config")
 local Logger    = require("core.logger")
@@ -21,18 +21,46 @@ local State     = require("turtles.miner.state")
 local Quarry = {}
 
 -- ============================================================
--- Helpers: detección y sellado de lava
+-- Bloques irrompibles conocidos
 -- ============================================================
+
+local UNBREAKABLE = {
+    ["minecraft:bedrock"]                    = true,
+    ["minecraft:barrier"]                    = true,
+    ["minecraft:command_block"]              = true,
+    ["minecraft:chain_command_block"]        = true,
+    ["minecraft:repeating_command_block"]    = true,
+    ["minecraft:end_portal_frame"]           = true,
+    ["minecraft:reinforced_deepslate"]       = true,
+}
+
+local function isUnbreakable(name)
+    return name ~= nil and UNBREAKABLE[name] == true
+end
 
 local function isLava(name)
     return name ~= nil and (name == "minecraft:lava" or name:find("lava") ~= nil)
 end
 
--- Busca un bloque sólido en el inventario para sellar lava.
--- Prefiere cobblestone/stone/dirt. Si no hay, usa cualquier no-combustible.
+-- ============================================================
+-- Clasificar bloque
+-- Retorna: "air" | "lava" | "unbreakable" | "normal"
+-- ============================================================
+
+local function classifyBlock(inspectFn)
+    local hasBlock, data = inspectFn()
+    if not hasBlock            then return "air"         end
+    if isLava(data.name)       then return "lava"        end
+    if isUnbreakable(data.name) then return "unbreakable" end
+    return "normal"
+end
+
+-- ============================================================
+-- Sellar lava
+-- ============================================================
+
 local function findSealingSlot()
     local preferred = { "cobblestone", "stone", "dirt", "gravel", "netherrack", "deepslate" }
-
     for slot = 1, 16 do
         if turtle.getItemCount(slot) > 0 then
             local d = turtle.getItemDetail(slot)
@@ -43,8 +71,7 @@ local function findSealingSlot()
             end
         end
     end
-
-    -- Segunda pasada: cualquier bloque que no sea combustible
+    -- Cualquier bloque no-combustible
     for slot = 1, 16 do
         if turtle.getItemCount(slot) > 0 then
             turtle.select(slot)
@@ -54,278 +81,319 @@ local function findSealingSlot()
             end
         end
     end
-
     turtle.select(1)
     return nil
 end
 
--- Sella lava en una dirección colocando un bloque sólido.
--- Reintenta hasta 3 veces (lava puede fluir de vuelta).
--- Retorna true si la dirección está segura para proceder.
 local function sealLava(inspectFn, placeFn, dirName)
     for attempt = 1, 3 do
         local hasBlock, data = inspectFn()
-        if not hasBlock or not isLava(data.name) then
-            return true  -- sin lava, seguro
-        end
-
+        if not hasBlock or not isLava(data.name) then return true end
         Logger.warn(string.format("Lava en %s (intento %d/3)", dirName, attempt))
-
         local slot = findSealingSlot()
         if not slot then
             Logger.error("Sin bloques para sellar lava en " .. dirName)
             return false
         end
-
         turtle.select(slot)
-        if not placeFn() then
-            Logger.warn("No se pudo colocar bloque en " .. dirName)
-        end
+        placeFn()
         turtle.select(1)
-        sleep(0.5)  -- esperar a que la lava adyacente fluya y se estabilice
+        sleep(0.5)
     end
-
-    -- Verificación final
     local hasBlock, data = inspectFn()
     if hasBlock and isLava(data.name) then
-        Logger.error("No se pudo sellar lava en " .. dirName .. " tras 3 intentos")
+        Logger.error("No se pudo sellar lava en " .. dirName)
         return false
     end
-
-    Logger.info("Lava sellada en " .. dirName)
     return true
 end
 
 -- ============================================================
--- Wrappers de excavación seguros contra lava
+-- Excavaciones seguras
 -- ============================================================
 
--- Sella lava si hay, luego excava y avanza.
-local function safeDigForward(sessionData)
-    sealLava(turtle.inspect, turtle.place, "frente")
-    if Movement.digForward() then
-        if sessionData then
-            sessionData.moveCount = (sessionData.moveCount or 0) + 1
-        end
-        return true
-    end
-    return false
-end
-
--- Sella lava si hay, luego excava y baja.
-local function safeDigDown(sessionData)
-    if not sealLava(turtle.inspectDown, turtle.placeDown, "abajo") then
+-- Excavar frente: retorna false si irrompible (no avanza).
+local function safeDigForward(session)
+    local kind = classifyBlock(turtle.inspect)
+    if kind == "lava" then
+        if not sealLava(turtle.inspect, turtle.place, "frente") then return false end
+    elseif kind == "unbreakable" then
+        local _, data = turtle.inspect()
+        Logger.warn("Irrompible al frente: " .. (data and data.name or "?"))
         return false
     end
-    if Movement.digDown() then
-        if sessionData then
-            sessionData.moveCount = (sessionData.moveCount or 0) + 1
-        end
+    if Movement.digForward() then
+        session.moveCount = (session.moveCount or 0) + 1
         return true
     end
     return false
 end
 
--- Sella lava en el techo si hay, luego excava hacia arriba.
--- Si no se puede sellar, deja el techo sin excavar (seguridad > cobertura).
+-- Excavar abajo: retorna false si irrompible (bedrock).
+local function safeDigDown(session)
+    local kind = classifyBlock(turtle.inspectDown)
+    if kind == "lava" then
+        if not sealLava(turtle.inspectDown, turtle.placeDown, "abajo") then return false end
+    elseif kind == "unbreakable" then
+        local _, data = turtle.inspectDown()
+        Logger.warn("Irrompible abajo: " .. (data and data.name or "?"))
+        return false
+    end
+    -- Grava/arena que cae
+    local digs = 0
+    while turtle.detectDown() and digs < 10 do
+        turtle.digDown()
+        sleep(0.3)
+        digs = digs + 1
+    end
+    if Movement.down() then
+        session.moveCount = (session.moveCount or 0) + 1
+        return true
+    end
+    return false
+end
+
+-- Excavar techo sin moverse (limpieza de altura doble).
 local function safeDigUp()
-    local hasBlock, data = turtle.inspectUp()
-    if hasBlock and isLava(data.name) then
-        Logger.warn("Lava en techo - sellando")
+    local kind = classifyBlock(turtle.inspectUp)
+    if kind == "lava" then
         local slot = findSealingSlot()
         if slot then
             turtle.select(slot)
             if turtle.placeUp() then
                 turtle.select(1)
                 sleep(0.3)
-                -- Ahora el techo es un bloque sólido, excavar normalmente
                 turtle.digUp()
                 return
             end
             turtle.select(1)
         end
-        Logger.warn("No se pudo sellar techo con lava - dejando")
+        Logger.warn("No se pudo sellar lava en techo")
         return
+    elseif kind == "unbreakable" then
+        return  -- dejar techo irrompible sin tocar
     end
-    -- Sin lava: excavar normalmente
     turtle.digUp()
 end
 
 -- ============================================================
--- Helper: volver a columna del pozo (x=0, z=0)
+-- Retorno a la columna de origen (x=0, z=0)
+-- Si el camino horizontal está bloqueado por irrompibles, sube.
 -- ============================================================
 
-local function returnToShaftColumn()
-    local p = Movement.getPos()
+local function returnToOriginColumn()
+    local MAX_CLIMB = 20
 
-    if p.x > 0 then
-        Movement.faceDir("west")
-        while Movement.getPos().x > 0 do
-            sealLava(turtle.inspect, turtle.place, "frente")
-            if turtle.detect() then turtle.dig() end
-            Movement.forward()
-        end
-    elseif p.x < 0 then
-        Movement.faceDir("east")
-        while Movement.getPos().x < 0 do
-            sealLava(turtle.inspect, turtle.place, "frente")
-            if turtle.detect() then turtle.dig() end
-            Movement.forward()
-        end
-    end
-
-    p = Movement.getPos()
-    if p.z > 0 then
-        Movement.faceDir("north")
-        while Movement.getPos().z > 0 do
-            sealLava(turtle.inspect, turtle.place, "frente")
-            if turtle.detect() then turtle.dig() end
-            Movement.forward()
-        end
-    elseif p.z < 0 then
-        Movement.faceDir("south")
-        while Movement.getPos().z < 0 do
-            sealLava(turtle.inspect, turtle.place, "frente")
-            if turtle.detect() then turtle.dig() end
-            Movement.forward()
-        end
-    end
-end
-
--- ============================================================
--- Phase 1: SHAFT
--- ============================================================
-
-function Quarry.digShaft(sessionData)
-    local depth = Config.SHAFT_DEPTH
-    local dug   = sessionData.shaftDug or 0
-
-    Logger.info(string.format("Pozo: %d/%d bloques", dug, depth))
-
-    for i = dug + 1, depth do
-        if not Fuel.hasSufficient((depth - i + 1) + depth) then
-            Logger.warn("Fuel insuficiente en pozo bloque " .. i)
-            sessionData.shaftDug = i - 1
-            return "FUEL"
-        end
-
-        if Inventory.isFull() then
-            Logger.warn("Inventario lleno en pozo bloque " .. i)
-            sessionData.shaftDug = i - 1
-            return "INVENTORY"
-        end
-
-        -- Excavar con protección contra lava y grava/arena
-        if not safeDigDown(sessionData) then
-            -- safeDigDown ya loggeó el error
-            sessionData.shaftDug = i - 1
-            return "BLOCKED"
-        end
-
-        sessionData.shaftDug = i
-        State.checkpoint(sessionData)
-    end
-
-    Logger.info("Pozo completo (" .. depth .. " bloques)")
-    return "COMPLETE"
-end
-
--- ============================================================
--- Phase 2: Una capa del quarry (serpentín seguro contra lava)
--- ============================================================
-
-local function mineLayer(layerNum, sessionData)
-    local width  = Config.QUARRY_WIDTH
-    local length = Config.QUARRY_LENGTH
-
-    Logger.info(string.format("Capa %d/%d", layerNum + 1, Config.SHAFT_DEPTH))
-
-    Movement.faceDir("east")
-
-    for row = 0, width - 1 do
-        if not Fuel.hasSufficient((width - row) * length + width + 20) then
-            Logger.warn("Fuel bajo en capa " .. layerNum .. " fila " .. row)
-            returnToShaftColumn()
-            sessionData.currentLayer = layerNum
-            return "FUEL"
-        end
-        if Inventory.isFull() then
-            Logger.warn("Inventario lleno en capa " .. layerNum .. " fila " .. row)
-            returnToShaftColumn()
-            sessionData.currentLayer = layerNum
-            return "INVENTORY"
-        end
-
-        -- Minar la fila
-        for col = 0, length - 2 do
-            safeDigUp()
-            safeDigForward(sessionData)
-        end
-        safeDigUp()  -- techo del último bloque
-
-        -- Paso al siguiente row
-        if row < width - 1 then
-            if row % 2 == 0 then
-                -- Mirando este → sur, avanzar 1, oeste
-                Movement.turnRight()
+    local function navigateAxis(getVal, posDir, negDir)
+        local climbed = 0
+        while getVal() ~= 0 do
+            local targetDir = getVal() > 0 and posDir or negDir
+            Movement.faceDir(targetDir)
+            local kind = classifyBlock(turtle.inspect)
+            if kind == "air" then
+                Movement.forward()
+            elseif kind == "lava" then
+                sealLava(turtle.inspect, turtle.place, targetDir)
+                turtle.dig()
+                Movement.forward()
+            elseif kind == "unbreakable" then
+                if climbed >= MAX_CLIMB then
+                    Logger.error("No se puede volver al origen: irrompibles")
+                    return false
+                end
                 safeDigUp()
-                safeDigForward(sessionData)
-                Movement.turnRight()
+                Movement.up()
+                climbed = climbed + 1
             else
-                -- Mirando oeste → sur, avanzar 1, este
-                Movement.turnLeft()
-                safeDigUp()
-                safeDigForward(sessionData)
-                Movement.turnLeft()
+                turtle.dig()
+                Movement.forward()
             end
         end
-
-        State.checkpoint(sessionData)
+        return true
     end
 
-    returnToShaftColumn()
-    Logger.debug("Capa " .. layerNum .. " completada")
+    -- Corregir X primero, luego Z
+    navigateAxis(function() return Movement.getPos().x end, "west", "east")
+    navigateAxis(function() return Movement.getPos().z end, "north", "south")
+end
+
+-- ============================================================
+-- API pública: Quarry.mineLayer
+--
+-- Mina una capa 16×16 en patrón serpentín, reanudando desde
+-- session.currentRow / session.currentColumn.
+--
+-- Retorna:
+--   "COMPLETE"       — capa terminada
+--   "INVENTORY_FULL" — inventario lleno (posición guardada en workPosition)
+--   "FUEL_LOW"       — combustible insuficiente (posición guardada)
+-- ============================================================
+
+function Quarry.mineLayer(session)
+    local W = Config.QUARRY_WIDTH   -- 16 filas (Z)
+    local L = Config.QUARRY_LENGTH  -- 16 bloques por fila (X)
+
+    local startRow = session.currentRow    or 0
+    local startCol = session.currentColumn or 0
+
+    Logger.info(string.format(
+        "Capa %d: minando desde fila %d col %d",
+        session.currentLayer, startRow, startCol
+    ))
+
+    -- Helper: guardar workPosition y retornar al origen
+    local function saveAndReturn(reason)
+        local p = Movement.getPos()
+        session.workPosition = {
+            x             = p.x,
+            y             = p.y,
+            z             = p.z,
+            dir           = Movement.getDir(),
+            currentLayer  = session.currentLayer,
+            currentRow    = session.currentRow,
+            currentColumn = session.currentColumn,
+        }
+        session.returningReason = reason
+        State.save(session)
+
+        returnToOriginColumn()
+        return reason
+    end
+
+    -- Orientación inicial de la capa.
+    -- Fila par → minamos hacia +X (east). Fila impar → hacia -X (west).
+    -- Al reanudar a mitad de fila debemos orientarnos correctamente.
+    local function rowDir(row)
+        return (row % 2 == 0) and "east" or "west"
+    end
+
+    for row = startRow, W - 1 do
+        session.currentRow = row
+
+        -- Fila par: de col 0→L-1 (east). Fila impar: de col L-1→0 (west).
+        local colStart, colEnd, colStep
+        if row % 2 == 0 then
+            colStart = (row == startRow) and startCol or 0
+            colEnd   = L - 2   -- L-1 avances para cubrir L bloques
+            colStep  = 1
+        else
+            colStart = (row == startRow) and startCol or (L - 2)
+            colEnd   = 0
+            colStep  = -1
+        end
+
+        -- Orientar al inicio de la fila
+        Movement.faceDir(rowDir(row))
+
+        -- Minar los bloques de la fila
+        local col = colStart
+        while (colStep == 1 and col <= colEnd) or (colStep == -1 and col >= colEnd) do
+            session.currentColumn = col
+
+            -- Verificar fuel e inventario antes de cada paso
+            local fuelNeeded = (W - row) * L + W + 20
+            if not Fuel.hasSufficient(fuelNeeded) then
+                Logger.warn(string.format("Fuel bajo en capa %d fila %d col %d",
+                    session.currentLayer, row, col))
+                return saveAndReturn("FUEL_LOW")
+            end
+            if Inventory.isFull() then
+                Logger.warn(string.format("Inventario lleno en capa %d fila %d col %d",
+                    session.currentLayer, row, col))
+                return saveAndReturn("INVENTORY_FULL")
+            end
+
+            safeDigUp()
+
+            -- Avanzar (ignorar irrompibles: volver al origen de la fila no es necesario,
+            -- simplemente dejamos ese bloque y saltamos la celda)
+            local kind = classifyBlock(turtle.inspect)
+            if kind == "unbreakable" then
+                Logger.warn(string.format("Bloque irrompible en fila %d col %d — saltando celda", row, col))
+                -- No avanzamos, pero sí continuamos el loop (la turtle se queda en sitio)
+                -- Esto significa que esa celda queda sin minar pero no bloqueamos el progreso.
+                -- En la siguiente iteración el loop terminará o girará a la siguiente fila.
+                -- Para que el pattern no se rompa, aquí abortamos la fila y vamos a la siguiente.
+                break
+            end
+
+            if not safeDigForward(session) then
+                Logger.warn("No se pudo avanzar en fila " .. row .. " — abortando fila")
+                break
+            end
+
+            State.checkpoint(session)
+            col = col + colStep
+        end
+
+        -- safeDigUp en el último bloque de la fila (posición actual)
+        safeDigUp()
+
+        -- Girar y avanzar a la siguiente fila (excepto en la última)
+        if row < W - 1 then
+            if row % 2 == 0 then
+                -- Terminamos mirando east, giramos south para avanzar en Z
+                Movement.faceDir("south")
+            else
+                -- Terminamos mirando west, giramos south para avanzar en Z
+                Movement.faceDir("south")
+            end
+
+            -- Verificar obstáculo al avanzar entre filas
+            local kind = classifyBlock(turtle.inspect)
+            if kind == "unbreakable" then
+                Logger.warn("Irrompible al avanzar a fila " .. (row+1) .. " — abortando capa")
+                session.currentRow    = row + 1
+                session.currentColumn = 0
+                returnToOriginColumn()
+                session.returningReason = "LAYER_COMPLETE"
+                return "COMPLETE"
+            end
+            safeDigUp()
+            if not safeDigForward(session) then
+                Logger.warn("No se pudo avanzar a la fila " .. (row+1))
+            end
+
+            State.checkpoint(session)
+        end
+    end
+
+    -- Capa completada: volver al origen de la columna
+    session.currentRow    = 0
+    session.currentColumn = 0
+    returnToOriginColumn()
+
+    Logger.info(string.format("Capa %d completada", session.currentLayer))
     return "COMPLETE"
 end
 
 -- ============================================================
--- Función principal
+-- API pública: Quarry.descendOneLayer
+--
+-- Baja LAYER_HEIGHT bloques desde la posición actual (columna origen).
+-- Retorna:
+--   "OK"      — bajó correctamente
+--   "BEDROCK" — detectó bedrock debajo, no bajó
 -- ============================================================
 
-function Quarry.run(sessionData)
-    sessionData.shaftDug     = sessionData.shaftDug     or 0
-    sessionData.currentLayer = sessionData.currentLayer or 0
+function Quarry.descendOneLayer(session)
+    local kind = classifyBlock(turtle.inspectDown)
+    if kind == "unbreakable" then
+        Logger.info("Bedrock detectado debajo: quarry terminado")
+        return "BEDROCK"
+    end
 
-    local depth = Config.SHAFT_DEPTH
-
-    -- Fase 1: pozo
-    if sessionData.shaftDug < depth then
-        local reason = Quarry.digShaft(sessionData)
-        if reason ~= "COMPLETE" then
-            return reason
+    for _ = 1, Config.LAYER_HEIGHT do
+        if not safeDigDown(session) then
+            -- Puede ser lava sellada o bloque temporal; intentar una vez más
+            if not safeDigDown(session) then
+                Logger.warn("No se pudo bajar a la siguiente capa")
+                return "BEDROCK"   -- tratamos como fin seguro
+            end
         end
     end
 
-    -- Fase 2: capas de abajo hacia arriba
-    for layer = sessionData.currentLayer, depth - 1 do
-        sessionData.currentLayer = layer
-
-        local reason = mineLayer(layer, sessionData)
-        if reason ~= "COMPLETE" then
-            return reason
-        end
-
-        if layer < depth - 1 then
-            Movement.up()
-            sessionData.moveCount = (sessionData.moveCount or 0) + 1
-        end
-
-        State.checkpoint(sessionData)
-    end
-
-    sessionData.currentLayer = depth
-    Logger.info("Quarry completo!")
-    return "COMPLETE"
+    return "OK"
 end
 
 return Quarry

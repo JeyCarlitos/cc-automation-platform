@@ -1,24 +1,20 @@
 -- turtles/miner/state.lua
--- Persistencia del estado de sesión de minería.
---
--- Guarda automáticamente posición, dirección y progreso para
--- poder recuperarse de un crash o apagado inesperado.
+-- Persistencia del estado de sesión — Chunk Quarry Vertical.
 --
 -- Formato del estado guardado:
 -- {
---   phase        = "MINING",
---   mainProgress = 24,     -- último bloque completado del túnel principal
---   moveCount    = 130,    -- movimientos totales en la sesión
---   x = 0, y = 0, z = 24, -- posición al momento del guardado
---   dir = "north",
+--   phase           = "MINING_LAYER",
+--   x=0, y=-5, z=0, dir="east",
+--   currentLayer    = 2,
+--   currentRow      = 5,
+--   currentColumn   = 7,
+--   moveCount       = 130,
+--   returningReason = "LAYER_COMPLETE",  -- razón del último retorno
+--   workPosition    = {                  -- dónde retomar tras descargar
+--     x=7, y=-10, z=3, dir="east",
+--     currentLayer=2, currentRow=5, currentColumn=7
+--   }
 -- }
---
--- Uso:
---   local State = require("turtles.miner.state")
---   State.save(data)
---   local saved = State.load()   -- nil si no hay sesión previa
---   State.checkpoint(data)       -- guarda solo si moveCount % INTERVAL == 0
---   State.clear()                -- borra al completar la sesión
 
 local Config = require("config.config")
 local Logger = require("core.logger")
@@ -38,8 +34,7 @@ end
 -- API pública
 -- ============================================================
 
--- Serializa 'data' y lo escribe en disco.
--- Retorna true si tuvo éxito.
+-- Serializa 'data' y lo escribe en disco. Retorna true si tuvo éxito.
 function State.save(data)
     ensureStateDir()
 
@@ -53,16 +48,18 @@ function State.save(data)
     file.close()
 
     Logger.debug(string.format(
-        "State saved: phase=%s progress=%d x=%d y=%d z=%d",
+        "State saved: phase=%s layer=%d row=%d col=%d x=%d y=%d z=%d",
         tostring(data.phase),
-        data.mainProgress or 0,
+        data.currentLayer  or 0,
+        data.currentRow    or 0,
+        data.currentColumn or 0,
         data.x or 0, data.y or 0, data.z or 0
     ))
     return true
 end
 
 -- Lee y deserializa el estado guardado.
--- Retorna la tabla con el estado, o nil si no existe o está corrupta.
+-- Retorna la tabla, o nil si no existe o está corrupta.
 function State.load()
     if not fs.exists(Config.STATE_FILE) then
         return nil
@@ -89,8 +86,11 @@ function State.load()
     end
 
     Logger.info(string.format(
-        "Sesion anterior encontrada: phase=%s, progreso=%d bloques",
-        tostring(data.phase), data.mainProgress or 0
+        "Sesion anterior: phase=%s capa=%d fila=%d col=%d",
+        tostring(data.phase),
+        data.currentLayer  or 0,
+        data.currentRow    or 0,
+        data.currentColumn or 0
     ))
     return data
 end
@@ -99,12 +99,11 @@ end
 function State.clear()
     if fs.exists(Config.STATE_FILE) then
         fs.delete(Config.STATE_FILE)
-        Logger.info("State cleared (sesión completada)")
+        Logger.info("State cleared (sesion completada)")
     end
 end
 
 -- Guarda solo si moveCount es múltiplo del intervalo configurado.
--- Llámalo después de cada movimiento para auto-guardado periódico.
 function State.checkpoint(data)
     local count = data.moveCount or 0
     if count > 0 and count % Config.STATE_SAVE_INTERVAL == 0 then

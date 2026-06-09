@@ -18,12 +18,11 @@ local ok, err = pcall(function()
 end)
 
 if not ok then
-    -- Imprimir el error claramente en pantalla
-    term.setTextColor and term.setTextColor(colors.red)
+    if term.setTextColor then term.setTextColor(colors.red) end
     print("")
     print("ERROR FATAL:")
     print(tostring(err))
-    term.setTextColor and term.setTextColor(colors.white)
+    if term.setTextColor then term.setTextColor(colors.white) end
     print("")
     print("Revisa data/logs/miner.log para mas detalles.")
     print("Corrige el error y ejecuta: startup")

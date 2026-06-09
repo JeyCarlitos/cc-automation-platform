@@ -284,6 +284,18 @@ function Quarry.mineLayer(session)
         session.currentLayer, startRow, startCol
     ))
 
+    -- Helper: sincronizar x,y,z,dir del objeto session con la posición real del tracker.
+    -- CRÍTICO: session.x/y/z/dir NO se actualizan automáticamente al moverse.
+    -- Sin esto, State.save(session) / State.checkpoint(session) guardan 0,0,0 y al
+    -- reanudar Movement.setState restaura el origen en vez de la posición real.
+    local function syncPos()
+        local p = Movement.getPos()
+        session.x   = p.x
+        session.y   = p.y
+        session.z   = p.z
+        session.dir = Movement.getDir()
+    end
+
     -- Helper: guardar workPosition y retornar al origen
     local function saveAndReturn(reason)
         local p = Movement.getPos()
@@ -297,6 +309,7 @@ function Quarry.mineLayer(session)
             currentColumn = session.currentColumn,
         }
         session.returningReason = reason
+        syncPos()
         State.save(session)
 
         returnToOriginColumn()
@@ -366,6 +379,7 @@ function Quarry.mineLayer(session)
                 break
             end
 
+            syncPos()
             State.checkpoint(session)
             col = col + colStep
         end
@@ -398,6 +412,7 @@ function Quarry.mineLayer(session)
                 Logger.warn("No se pudo avanzar a la fila " .. (row+1))
             end
 
+            syncPos()
             State.checkpoint(session)
         end
     end

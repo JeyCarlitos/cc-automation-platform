@@ -320,6 +320,15 @@ function Miner.run()
 
     elseif phase == "DESCENDING_NEXT_LAYER" then
         local nextLayer = session.currentLayer + 1
+        -- Verificar límite de capas al reanudar
+        if Config.MAX_LAYERS and nextLayer >= Config.MAX_LAYERS then
+            Logger.info("Límite de capas alcanzado al reanudar. Regresando a base.")
+            returnToBase()
+            unloadAndRefuel()
+            State.clear()
+            print("Quarry completo! Limite de capas alcanzado.")
+            return
+        end
         local result = Quarry.descendToLayer(session, nextLayer)
         if result == "BEDROCK" then
             State.save(snapshot("RETURNING_TO_BASE"))
@@ -399,7 +408,7 @@ function Miner.run()
                 phase = "MINING_LAYER"
 
             else  -- result == "COMPLETE"
-                -- Capa terminada
+                -- Capa terminada — solo subir si RETURN_AFTER_EACH_LAYER está activo
                 if Config.RETURN_AFTER_EACH_LAYER then
                     session.returningReason = "LAYER_COMPLETE"
                     session.phase = "RETURNING_TO_BASE"
@@ -418,14 +427,14 @@ function Miner.run()
 
         -- ── DESCENDING_NEXT_LAYER ──────────────────────────────
         elseif phase == "DESCENDING_NEXT_LAYER" then
-            -- La siguiente capa tiene un Y absoluto basado en su número.
-            -- Esto funciona tanto si la turtle está en y=0 (RETURN_AFTER_EACH_LAYER)
-            -- como si está en la capa anterior (sin retorno).
             local nextLayer = session.currentLayer + 1
-            local result = Quarry.descendToLayer(session, nextLayer)
 
-            if result == "BEDROCK" then
-                Logger.info("Bedrock encontrado: quarry terminado")
+            -- Verificar límite de capas (MAX_LAYERS)
+            if Config.MAX_LAYERS and nextLayer >= Config.MAX_LAYERS then
+                Logger.info(string.format(
+                    "Límite de capas alcanzado (%d). Finalizando quarry.",
+                    Config.MAX_LAYERS
+                ))
                 session.returningReason = "LAYER_COMPLETE"
                 session.phase = "RETURNING_TO_BASE"
                 State.save(snapshot("RETURNING_TO_BASE"))
@@ -433,13 +442,28 @@ function Miner.run()
                 unloadAndRefuel()
                 phase = "COMPLETE"
             else
-                session.currentLayer    = nextLayer
-                session.currentRow      = 0
-                session.currentColumn   = 0
-                session.workPosition    = nil
-                session.phase = "MINING_LAYER"
-                phase = "MINING_LAYER"
-                Logger.info(string.format("En capa %d", nextLayer))
+                -- La siguiente capa tiene un Y absoluto basado en su número.
+                -- Funciona tanto si la turtle está en y=0 (RETURN_AFTER_EACH_LAYER)
+                -- como si está en la capa anterior (sin retorno entre capas).
+                local result = Quarry.descendToLayer(session, nextLayer)
+
+                if result == "BEDROCK" then
+                    Logger.info("Bedrock encontrado: quarry terminado")
+                    session.returningReason = "LAYER_COMPLETE"
+                    session.phase = "RETURNING_TO_BASE"
+                    State.save(snapshot("RETURNING_TO_BASE"))
+                    returnToBase()
+                    unloadAndRefuel()
+                    phase = "COMPLETE"
+                else
+                    session.currentLayer    = nextLayer
+                    session.currentRow      = 0
+                    session.currentColumn   = 0
+                    session.workPosition    = nil
+                    session.phase = "MINING_LAYER"
+                    phase = "MINING_LAYER"
+                    Logger.info(string.format("En capa %d", nextLayer))
+                end
             end
 
         else

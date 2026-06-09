@@ -67,78 +67,89 @@ local function snapshot(phase)
     }
 end
 
--- Sube hasta y == 0.
--- El pozo (x=0,z=0) está despejado; simplemente sube.
-local function ascendToBase()
+-- Navega a {x=0, z=0, y=0} (punto inicial / cofre).
+--
+-- ORDEN CORRECTO:
+--   1. Navegar horizontalmente a x=0, z=0 en el nivel actual (zona minada = aire)
+--   2. Subir por el pozo central hasta y=0
+--
+-- NO subir primero: si la turtle está en x=7, z=3 y sube primero,
+-- escava fuera del pozo y llega a la superficie en el lugar equivocado.
+local function returnToBase()
+    local p = Movement.getPos()
     Logger.info(string.format(
-        "Subiendo a base desde y=%d (x=%d z=%d)",
-        Movement.getPos().y, Movement.getPos().x, Movement.getPos().z
+        "returnToBase: desde x=%d y=%d z=%d dir=%s",
+        p.x, p.y, p.z, Movement.getDir()
     ))
+
+    -- ── Paso 1: navegar a x=0 ────────────────────────────────────
+    while Movement.getPos().x ~= 0 do
+        sleep(0)
+        local d = Movement.getPos().x > 0 and "west" or "east"
+        Movement.faceDir(d)
+        if turtle.detect() then turtle.dig() end
+        if not Movement.forward() then
+            -- bloqueo temporal (entidad, arena cayendo): esperar y reintentar
+            sleep(0.5)
+        end
+    end
+
+    -- ── Paso 2: navegar a z=0 ────────────────────────────────────
+    while Movement.getPos().z ~= 0 do
+        sleep(0)
+        local d = Movement.getPos().z > 0 and "north" or "south"
+        Movement.faceDir(d)
+        if turtle.detect() then turtle.dig() end
+        if not Movement.forward() then
+            sleep(0.5)
+        end
+    end
+
+    Logger.info(string.format(
+        "En columna del pozo: x=%d z=%d y=%d — subiendo",
+        Movement.getPos().x, Movement.getPos().z, Movement.getPos().y
+    ))
+
+    -- ── Paso 3: subir por el pozo hasta y=0 ─────────────────────
     local stuckCount = 0
     while Movement.getPos().y < 0 do
-        sleep(0)  -- yield: turtle.inspectUp no hace yield por sí solo
+        sleep(0)
         local hasBlock, data = turtle.inspectUp()
         if hasBlock then
             if data and isUnbreakableLocal(data.name) then
-                Logger.warn("Techo irrompible al subir — buscando escape lateral")
-                local escaped = false
-                for _ = 1, 4 do
-                    Movement.turnRight()
-                    if not turtle.detect() then
-                        Movement.forward()
-                        escaped = true
-                        break
-                    end
-                end
-                if not escaped then
-                    stuckCount = stuckCount + 1
-                    if stuckCount > 10 then
-                        Logger.error("Atrapado bajo bloque irrompible, abortando subida")
-                        break
-                    end
-                end
+                Logger.error("Irrompible en techo del pozo en y=" .. Movement.getPos().y)
+                stuckCount = stuckCount + 1
+                if stuckCount > 6 then break end
+                -- Intentar moverse lateralmente para salir del irrompible
+                Movement.turnRight()
+                if not turtle.detect() then Movement.forward() end
             else
                 turtle.digUp()
-                Movement.up()
+                if not Movement.up() then sleep(0.5) end
             end
         else
-            Movement.up()
+            if not Movement.up() then sleep(0.5) end
         end
     end
-    Logger.info("En Y=0")
-end
-
--- Navega a {x=0, z=0} en el nivel actual, luego sube a y=0.
-local function returnToBase()
-    Logger.info(string.format(
-        "Regresando a base desde x=%d y=%d z=%d",
-        Movement.getPos().x, Movement.getPos().y, Movement.getPos().z
-    ))
-
-    -- 1. Subir primero: el pozo central siempre está despejado
-    ascendToBase()
-
-    -- 2. Ajustar X y Z (a nivel y=0, sin obstáculos normales)
-    local function digAndMove(dir)
-        sleep(0)
-        Movement.faceDir(dir)
-        if turtle.detect() then turtle.dig() end
-        Movement.forward()
-    end
-
-    while Movement.getPos().x > 0 do digAndMove("west")  end
-    while Movement.getPos().x < 0 do digAndMove("east")  end
-    while Movement.getPos().z > 0 do digAndMove("north") end
-    while Movement.getPos().z < 0 do digAndMove("south") end
 
     Movement.faceDir("north")
-    Logger.info("Turtle en base {0,0,0}")
+    Logger.info(string.format(
+        "BASE ALCANZADA: x=%d y=%d z=%d",
+        Movement.getPos().x, Movement.getPos().y, Movement.getPos().z
+    ))
 end
 
--- Descarga el inventario y recarga combustible.
+-- Descarga el inventario en el cofre y recarga combustible.
+-- El cofre debe estar en la dirección Config.CHEST_DIRECTION
+-- relativa al punto de origen {0,0,0} con la turtle mirando norte.
 local function unloadAndRefuel()
-    Logger.info("Descargando inventario (" .. Config.CHEST_DIRECTION .. ")")
+    local p = Movement.getPos()
+    Logger.info(string.format(
+        "unloadAndRefuel: en x=%d y=%d z=%d, cofre=%s",
+        p.x, p.y, p.z, Config.CHEST_DIRECTION
+    ))
 
+    -- Orientarse hacia el cofre
     local chest = Config.CHEST_DIRECTION
     if chest == "back" then
         Movement.faceDir("south")

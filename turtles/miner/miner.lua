@@ -248,8 +248,28 @@ end
 function Miner.run()
     Logger.info("=== CCAP Miner v2 (Chunk Quarry Vertical) ===")
 
+    -- Fases válidas del nuevo sistema. Cualquier otra (ej. "SHAFT" del código viejo)
+    -- se descarta para evitar loops infinitos sin yield.
+    local VALID_PHASES = {
+        PREPARING=true, IDLE=true, DESCENDING_TO_START=true, MINING_LAYER=true,
+        RETURNING_TO_BASE=true, UNLOADING=true, RETURNING_TO_WORK=true,
+        DESCENDING_NEXT_LAYER=true, COMPLETE=true, ERROR=true,
+    }
+
     -- Intentar recuperar sesión anterior
     local saved = State.load()
+    if saved then
+        local loadedPhase = saved.phase or "PREPARING"
+        if not VALID_PHASES[loadedPhase] then
+            Logger.warn(string.format(
+                "Fase '%s' no reconocida (sesion de version anterior). Reiniciando.",
+                tostring(loadedPhase)
+            ))
+            State.clear()
+            saved = nil
+        end
+    end
+
     if saved then
         session.phase           = saved.phase           or "PREPARING"
         session.currentLayer    = saved.currentLayer    or 0
@@ -350,6 +370,7 @@ function Miner.run()
     -- ============================================================
 
     while phase ~= "COMPLETE" and phase ~= "ERROR" do
+        sleep(0)  -- yield de seguridad: evita "Too long without yielding"
 
         -- ── DESCENDING_TO_START ────────────────────────────────
         if phase == "DESCENDING_TO_START" then
@@ -438,6 +459,12 @@ function Miner.run()
                 phase = "MINING_LAYER"
                 Logger.info(string.format("Bajé a capa %d", session.currentLayer))
             end
+
+        else
+            -- Fase no reconocida: no debería llegar aquí, pero si ocurre
+            -- evitamos un loop infinito sin yield.
+            Logger.error("Fase no reconocida en bucle: " .. tostring(phase))
+            phase = "ERROR"
         end
     end
 

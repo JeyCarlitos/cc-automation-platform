@@ -14,8 +14,8 @@ Config.FUEL_SAFETY_MARGIN = 50
 -- ============================================================
 
 -- Profundidad del pozo vertical antes de empezar a minar capas.
--- 116 bloques llega cerca del bedrock en el nuevo sistema de alturas.
-Config.SHAFT_DEPTH    = 116
+-- 40 bloques es la profundidad típica para comenzar la minería de capas.
+Config.SHAFT_DEPTH    = 40
 
 -- Dimensiones del área a minar por capa (16x16 = un chunk completo).
 Config.QUARRY_WIDTH   = 16   -- filas (dirección Z)

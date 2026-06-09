@@ -16,17 +16,17 @@ local BASE_URL    = "https://raw.githubusercontent.com/"
 -- Agregar aquí cada nuevo archivo que se añada al repo.
 local FILES = {
     "startup.lua",
+    "install.lua",       -- se auto-actualiza desde GitHub
     "config/config.lua",
     "core/logger.lua",
     "core/movement.lua",
     "core/fuel.lua",
     "core/inventory.lua",
     "turtles/miner/state.lua",
-    "turtles/miner/branchMining.lua",
+    "turtles/miner/quarry.lua",
     "turtles/miner/miner.lua",
 }
 
--- Directorios a crear antes de descargar archivos.
 local DIRS = {
     "config",
     "core",
@@ -65,7 +65,6 @@ local function checkHTTP()
         print("")
         print("Para habilitar HTTP en CC:Tweaked:")
         print("  1. Abre serverconfig/computercraft-server.toml")
-        print("     (o config/computercraft.cfg en versiones antiguas)")
         print("  2. Establece: http_enable = true")
         print("  3. Agrega a la allowlist: raw.githubusercontent.com")
         print("  4. Reinicia el servidor / juego")
@@ -99,8 +98,7 @@ local function downloadFile(path)
     local response, err = http.get(url)
 
     if not response then
-        fail(path .. "  (sin respuesta HTTP: " .. tostring(err) .. ")")
-        fail("  URL intentada: " .. url)
+        fail(path .. "  (" .. tostring(err) .. ")")
         return false
     end
 
@@ -119,14 +117,11 @@ local function downloadFile(path)
         return false
     end
 
-    -- Sobrescribir si ya existe
-    if fs.exists(path) then
-        fs.delete(path)
-    end
+    if fs.exists(path) then fs.delete(path) end
 
     local file = fs.open(path, "w")
     if not file then
-        fail(path .. "  (no se pudo abrir para escritura)")
+        fail(path .. "  (no se pudo escribir)")
         return false
     end
     file.write(content)
@@ -149,13 +144,10 @@ local function main()
     print("  " .. REPO_USER .. "/" .. REPO_NAME .. " @ " .. REPO_BRANCH)
     print("========================================")
 
-    -- Verificar HTTP antes de intentar cualquier descarga
     if not checkHTTP() then return end
 
-    -- Crear carpetas
     createDirs()
 
-    -- Descargar todos los archivos
     print("\nDescargando archivos del proyecto...")
     local successCount = 0
     local failCount    = 0
@@ -168,21 +160,25 @@ local function main()
         end
     end
 
-    -- Crear alias "update" copiando este instalador
-    -- Permite ejecutar `update` en el futuro en lugar de re-descargar install.lua
-    local runningAs = shell.getRunningProgram()
-    if fs.exists(runningAs) then
+    -- Actualizar el comando "update" con la versión recién descargada de install.lua.
+    -- Así "update" siempre tiene el código más reciente del repo.
+    if fs.exists("install.lua") then
         if fs.exists("update") then fs.delete("update") end
-        fs.copy(runningAs, "update")
-        ok("update  (alias creado)")
+        fs.copy("install.lua", "update")
+        ok("update  (actualizado desde install.lua)")
+    elseif fs.exists(shell.getRunningProgram()) then
+        if fs.exists("update") then fs.delete("update") end
+        fs.copy(shell.getRunningProgram(), "update")
+        ok("update  (alias de " .. shell.getRunningProgram() .. ")")
     end
 
-    -- Resumen final
     print("")
     print("========================================")
 
     if failCount == 0 then
-        printColored(colors.green, "  Instalacion completa! (" .. successCount .. " archivos)")
+        if term.setTextColor then term.setTextColor(colors.green) end
+        print("  Instalacion completa! (" .. successCount .. " archivos)")
+        if term.setTextColor then term.setTextColor(colors.white) end
         print("")
         print("  Para ejecutar el miner:")
         print("    startup")
@@ -190,16 +186,11 @@ local function main()
         print("  Para actualizar desde GitHub:")
         print("    update")
     else
-        printColored(colors.orange,
-            "  Instalacion parcial: " .. successCount .. " OK, " .. failCount .. " fallidos")
+        if term.setTextColor then term.setTextColor(colors.orange) end
+        print("  Instalacion parcial: " .. successCount .. " OK, " .. failCount .. " fallidos")
+        if term.setTextColor then term.setTextColor(colors.white) end
         print("")
-        print("  Verifica tu conexion y ejecuta de nuevo:")
-        print("    install")
-        print("")
-        print("  Si el problema persiste, revisa:")
-        print("    - HTTP habilitado en CC:Tweaked config")
-        print("    - raw.githubusercontent.com en la allowlist")
-        print("    - Nombre de usuario/repo correcto en install.lua")
+        print("  Ejecuta de nuevo: install")
     end
 
     print("========================================")

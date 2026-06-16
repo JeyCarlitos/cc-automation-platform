@@ -170,7 +170,11 @@ end
 -- Excavar techo sin moverse (limpieza de altura doble).
 local function safeDigUp()
     local kind = classifyBlock(turtle.inspectUp)
-    if kind == "lava" then
+    if kind == "turtle" then
+        Logger.warn("Turtle detectada arriba — esperando 3s")
+        sleep(3)
+        return
+    elseif kind == "lava" then
         local slot = findSealingSlot()
         if slot then
             turtle.select(slot)
@@ -216,6 +220,9 @@ local function returnToOriginColumn()
                 sealLava(turtle.inspect, turtle.place, targetDir)
                 turtle.dig()
                 Movement.forward()
+            elseif kind == "turtle" then
+                Logger.warn("Turtle bloqueando retorno al origen — esperando 3s")
+                sleep(3)
             elseif kind == "unbreakable" then
                 if climbed >= MAX_CLIMB then
                     Logger.error("No se puede volver al origen del pozo: irrompibles")

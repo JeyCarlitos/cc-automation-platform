@@ -42,15 +42,21 @@ local function isLava(name)
     return name ~= nil and (name == "minecraft:lava" or name:find("lava") ~= nil)
 end
 
+-- Detecta si el bloque es otra turtle (CC:Tweaked: computercraft:turtle_*)
+local function isTurtleBlock(name)
+    return name ~= nil and name:find("turtle") ~= nil
+end
+
 -- ============================================================
 -- Clasificar bloque
--- Retorna: "air" | "lava" | "unbreakable" | "normal"
+-- Retorna: "air" | "turtle" | "lava" | "unbreakable" | "normal"
 -- ============================================================
 
 local function classifyBlock(inspectFn)
     local hasBlock, data = inspectFn()
-    if not hasBlock            then return "air"         end
-    if isLava(data.name)       then return "lava"        end
+    if not hasBlock             then return "air"         end
+    if isTurtleBlock(data.name) then return "turtle"      end
+    if isLava(data.name)        then return "lava"        end
     if isUnbreakable(data.name) then return "unbreakable" end
     return "normal"
 end
@@ -112,10 +118,14 @@ end
 -- Excavaciones seguras
 -- ============================================================
 
--- Excavar frente: retorna false si irrompible (no avanza).
+-- Excavar frente: retorna false si irrompible o hay turtle enfrente.
 local function safeDigForward(session)
     local kind = classifyBlock(turtle.inspect)
-    if kind == "lava" then
+    if kind == "turtle" then
+        Logger.warn("Turtle detectada al frente — esperando 3s")
+        sleep(3)
+        return false
+    elseif kind == "lava" then
         if not sealLava(turtle.inspect, turtle.place, "frente") then return false end
     elseif kind == "unbreakable" then
         local _, data = turtle.inspect()
@@ -129,10 +139,14 @@ local function safeDigForward(session)
     return false
 end
 
--- Excavar abajo: retorna false si irrompible (bedrock).
+-- Excavar abajo: retorna false si irrompible (bedrock) o hay turtle debajo.
 local function safeDigDown(session)
     local kind = classifyBlock(turtle.inspectDown)
-    if kind == "lava" then
+    if kind == "turtle" then
+        Logger.warn("Turtle detectada abajo — esperando 3s")
+        sleep(3)
+        return false
+    elseif kind == "lava" then
         if not sealLava(turtle.inspectDown, turtle.placeDown, "abajo") then return false end
     elseif kind == "unbreakable" then
         local _, data = turtle.inspectDown()

@@ -175,6 +175,14 @@ local function main()
         ok("update  (alias de " .. shell.getRunningProgram() .. ")")
     end
 
+    -- Crear/actualizar el shortcut "commander" en la raíz.
+    -- Permite ejecutar 'commander' directamente desde cualquier máquina.
+    if fs.exists("controller/commander.lua") then
+        if fs.exists("commander") then fs.delete("commander") end
+        fs.copy("controller/commander.lua", "commander")
+        ok("commander  (shortcut actualizado)")
+    end
+
     print("")
     print("========================================")
 

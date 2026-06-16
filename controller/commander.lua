@@ -7,13 +7,15 @@
 --   commander
 --
 -- Comandos:
---   s  [id]  — STATUS: estado de todas o de una turtle específica
---   r  [id]  — RETURN: regresar a base y parar
---   d  [id]  — DEPOSIT: descargar inventario y seguir minando
---   u  [id]  — UPDATE: actualizar código desde GitHub y reiniciar
---   rb [id]  — REBOOT: reiniciar turtle
---   list     — listar turtles conocidas
---   q        — salir
+--   init          — asignar zonas e iniciar descenso (arranque inicial)
+--   zone <id> <N> — asignar zona N a una turtle específica (reemplazo)
+--   s  [id]       — STATUS de todas o de una
+--   r  [id]       — RETURN: regresar a base y parar
+--   d  [id]       — DEPOSIT: descargar y seguir minando
+--   u  [id]       — UPDATE: actualizar código y reiniciar
+--   rb [id]       — REBOOT: reiniciar turtle
+--   list          — turtles conocidas
+--   q             — salir
 --
 --  [id] es el número de ID de la turtle (omítelo para enviar a TODAS).
 
@@ -194,14 +196,15 @@ local function printHeader()
     clrln(colors.cyan, "==========================================")
     print("")
     clrln(colors.yellow, "  Comandos:")
-    clr(colors.lime, "   init     "); clrln(colors.white, "— asignar zonas e iniciar descenso")
-    print("   s  [id]  — estado actual de todas o una")
-    print("   r  [id]  — regresar a base y parar")
-    print("   d  [id]  — descargar y seguir minando")
-    print("   u  [id]  — actualizar código y reiniciar")
-    print("   rb [id]  — reiniciar turtle")
-    print("   list     — turtles conocidas")
-    print("   q        — salir")
+    clr(colors.lime,      "   init          "); clrln(colors.white, "— arranque: asignar zonas y bajar")
+    clr(colors.lime,      "   zone <id> <N> "); clrln(colors.white, "— reemplazar turtle destruida")
+    print("   s  [id]       — estado actual")
+    print("   r  [id]       — regresar a base y parar")
+    print("   d  [id]       — descargar y seguir minando")
+    print("   u  [id]       — actualizar código y reiniciar")
+    print("   rb [id]       — reiniciar turtle")
+    print("   list          — turtles conocidas")
+    print("   q             — salir")
     print("")
     clrln(colors.lightGray, "  Omite [id] para enviar a TODAS.")
     print("")
@@ -210,6 +213,65 @@ end
 -- ============================================================
 -- Parser de entrada
 -- ============================================================
+
+-- ============================================================
+-- Comando ZONE — asignar zona a una turtle específica (reemplazo)
+-- Uso: zone <id> <N>
+-- Envía ZONE:N + START a la turtle, espera AT_DEPTH.
+-- ============================================================
+
+local function assignZone(targetId, zoneNum)
+    clrln(colors.yellow, string.format(
+        "Asignando Zona %d a [ID:%d]...", zoneNum, targetId
+    ))
+
+    -- Enviar ZONE:N
+    rednet.send(targetId, "ZONE:" .. zoneNum, PROTOCOL)
+    local replies = collectReplies(TIMEOUT, {targetId})
+
+    if #replies == 0 then
+        clrln(colors.red, "  Sin respuesta. ¿La turtle está encendida y en rango?")
+        print("")
+        return
+    end
+    clr(colors.lime, "  ✓ zona asignada — ")
+    clrln(colors.white, replies[1].msg)
+    registerTurtle(targetId)
+
+    -- Enviar START
+    sleep(0.5)
+    clrln(colors.yellow, "  Enviando START — esperando que llegue a profundidad...")
+    rednet.send(targetId, "START", PROTOCOL)
+
+    -- Esperar AT_DEPTH (máx 5 min)
+    local arrived  = false
+    local deadline = os.clock() + 300
+    while not arrived and os.clock() < deadline do
+        local remaining = math.max(0.1, deadline - os.clock())
+        local t = os.startTimer(remaining)
+        local event, p1, p2, p3 = os.pullEvent()
+        if event == "rednet_message" then
+            local sid, msg, proto = p1, p2, p3
+            os.cancelTimer(t)
+            if proto == PROTOCOL and sid == targetId
+                    and tostring(msg):find("AT_DEPTH") then
+                arrived = true
+                clr(colors.lime, "  ✓ en profundidad — ")
+                clrln(colors.white, tostring(msg))
+            end
+        elseif event == "timer" and p1 == t then
+            break
+        else
+            os.cancelTimer(t)
+        end
+    end
+
+    if not arrived then
+        clrln(colors.orange, "  Timeout. La turtle puede estar bajando todavía.")
+        clrln(colors.lightGray, "  Usa 's " .. targetId .. "' para verificar su estado.")
+    end
+    print("")
+end
 
 -- ============================================================
 -- Comando INIT — registro de zonas y descenso secuencial
@@ -378,7 +440,21 @@ while true do
 
     local cmd, targetId = parseInput(raw)
 
-    if     cmd == "QUIT"    then break
+    -- Caso especial: "zone <id> <N>"
+    local zoneWords = {}
+    for w in raw:lower():gmatch("%S+") do zoneWords[#zoneWords+1] = w end
+
+    if zoneWords[1] == "zone" then
+        local zId = tonumber(zoneWords[2])
+        local zN  = tonumber(zoneWords[3])
+        if zId and zN then
+            assignZone(zId, zN)
+        else
+            clrln(colors.red, "  Uso: zone <id> <número_de_zona>")
+            clrln(colors.lightGray, "  Ejemplo: zone 45 2  →  asigna Zona 2 a la turtle con ID 45")
+            print("")
+        end
+    elseif cmd == "QUIT"    then break
     elseif cmd == "LIST"    then listTurtles()
     elseif cmd == "INIT"    then runInit()
     elseif cmd == "EMPTY"   then -- ignorar
@@ -386,7 +462,7 @@ while true do
     elseif cmd ~= nil       then runCmd(cmd, targetId)
     else
         clrln(colors.red, "  Comando no reconocido.")
-        print("  Usa: s, r, d, u, rb, list, q")
+        print("  Usa: init, zone, s, r, d, u, rb, list, q")
         print("")
     end
 end

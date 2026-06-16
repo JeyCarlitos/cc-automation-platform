@@ -34,6 +34,19 @@ local State     = require("turtles.miner.state")
 local Quarry    = require("turtles.miner.quarry")
 local Network   = require("core.network")
 
+-- ============================================================
+-- Detección de colisión: evita destruir otra turtle
+-- ============================================================
+local function canDig(inspectFn)
+    local ok, data = inspectFn()
+    if ok and data and data.name and data.name:find("turtle") then
+        Logger.warn("Otra turtle detectada — esperando 3s para evitar colision")
+        sleep(3)
+        return false
+    end
+    return true
+end
+
 local Miner = {}
 
 -- ============================================================
@@ -91,13 +104,13 @@ local function travelToShaft()
     while Movement.getPos().x ~= sx do
         sleep(0)
         Movement.faceDir(Movement.getPos().x < sx and "east" or "west")
-        if turtle.detect() then turtle.dig() end
+        if turtle.detect() and canDig(turtle.inspect) then turtle.dig() end
         if not Movement.forward() then sleep(0.5) end
     end
     while Movement.getPos().z ~= sz do
         sleep(0)
         Movement.faceDir(Movement.getPos().z < sz and "south" or "north")
-        if turtle.detect() then turtle.dig() end
+        if turtle.detect() and canDig(turtle.inspect) then turtle.dig() end
         if not Movement.forward() then sleep(0.5) end
     end
     Logger.info("En pozo compartido")
@@ -123,14 +136,14 @@ local function returnToBase()
         sleep(0)
         local d = Movement.getPos().x > sx and "west" or "east"
         Movement.faceDir(d)
-        if turtle.detect() then turtle.dig() end
+        if turtle.detect() and canDig(turtle.inspect) then turtle.dig() end
         if not Movement.forward() then sleep(0.5) end
     end
     while Movement.getPos().z ~= sz do
         sleep(0)
         local d = Movement.getPos().z > sz and "north" or "south"
         Movement.faceDir(d)
-        if turtle.detect() then turtle.dig() end
+        if turtle.detect() and canDig(turtle.inspect) then turtle.dig() end
         if not Movement.forward() then sleep(0.5) end
     end
 
@@ -152,7 +165,7 @@ local function returnToBase()
                 Movement.turnRight()
                 if not turtle.detect() then Movement.forward() end
             else
-                turtle.digUp()
+                if canDig(turtle.inspectUp) then turtle.digUp() end
                 if not Movement.up() then sleep(0.5) end
             end
         else
@@ -166,14 +179,14 @@ local function returnToBase()
             sleep(0)
             local d = Movement.getPos().x > 0 and "west" or "east"
             Movement.faceDir(d)
-            if turtle.detect() then turtle.dig() end
+            if turtle.detect() and canDig(turtle.inspect) then turtle.dig() end
             if not Movement.forward() then sleep(0.5) end
         end
         while Movement.getPos().z ~= 0 do
             sleep(0)
             local d = Movement.getPos().z > 0 and "north" or "south"
             Movement.faceDir(d)
-            if turtle.detect() then turtle.dig() end
+            if turtle.detect() and canDig(turtle.inspect) then turtle.dig() end
             if not Movement.forward() then sleep(0.5) end
         end
     end
@@ -213,13 +226,13 @@ local function travelToWorkXZ(wp)
     while Movement.getPos().x ~= wp.x do
         sleep(0)
         Movement.faceDir(Movement.getPos().x < wp.x and "east" or "west")
-        if turtle.detect() then turtle.dig() end
+        if turtle.detect() and canDig(turtle.inspect) then turtle.dig() end
         Movement.forward()
     end
     while Movement.getPos().z ~= wp.z do
         sleep(0)
         Movement.faceDir(Movement.getPos().z < wp.z and "south" or "north")
-        if turtle.detect() then turtle.dig() end
+        if turtle.detect() and canDig(turtle.inspect) then turtle.dig() end
         Movement.forward()
     end
     Movement.faceDir(wp.dir)

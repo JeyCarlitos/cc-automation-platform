@@ -35,16 +35,46 @@ local Quarry    = require("turtles.miner.quarry")
 local Network   = require("core.network")
 
 -- ============================================================
--- Detección de colisión: evita destruir otra turtle
+-- Navegación segura con anti-deadlock.
+--
+-- Mueve la turtle desde la posición actual hasta 'target' en un eje.
+--   • Bloque normal  → excavar y avanzar.
+--   • Otra turtle    → esperar con jitter basado en ID propio (desincroniza
+--                      turtles con el mismo destino). Tras 3 bloqueos seguidos,
+--                      retrocede un bloque para ceder el paso y romper deadlock.
+--   • Camino libre   → avanzar directamente.
 -- ============================================================
-local function canDig(inspectFn)
-    local ok, data = inspectFn()
-    if ok and data and data.name and data.name:find("turtle") then
-        Logger.warn("Otra turtle detectada — esperando 3s para evitar colision")
-        sleep(3)
-        return false
+local function navAxis(getCoord, target, plusDir, minusDir)
+    local blocked = 0
+    while getCoord() ~= target do
+        sleep(0)
+        local dir = getCoord() < target and plusDir or minusDir
+        Movement.faceDir(dir)
+        local hasBlock, data = turtle.inspect()
+        if not hasBlock then
+            if Movement.forward() then blocked = 0 else sleep(0.3) end
+        elseif data and data.name and data.name:find("turtle") then
+            blocked = blocked + 1
+            local wait = 1 + (os.getComputerID() % 3)   -- 1, 2 o 3s según ID
+            Logger.warn(string.format(
+                "Turtle enfrente (bloqueo %d) — esperando %ds (ID=%d)",
+                blocked, wait, os.getComputerID()
+            ))
+            sleep(wait)
+            if blocked >= 3 then
+                -- Retroceder un bloque para ceder el paso y romper el deadlock
+                Movement.faceDir(getCoord() < target and minusDir or plusDir)
+                if Movement.forward() then
+                    Logger.info("Cediendo paso — retrocedi un bloque")
+                end
+                blocked = 0
+                sleep(2)
+            end
+        else
+            turtle.dig()
+            if Movement.forward() then blocked = 0 else sleep(0.3) end
+        end
     end
-    return true
 end
 
 local Miner = {}
@@ -95,25 +125,28 @@ local function snapshot(phase)
     }
 end
 
--- Navega en superficie desde la posición actual hasta el pozo compartido.
+-- Asigna el pozo individual de esta turtle: SHAFT_X = inicio de su zona.
+-- Con pozos separados, dos turtles nunca comparten el mismo eje vertical
+-- y las colisiones subterráneas son físicamente imposibles.
+local function updateShaftFromZone()
+    if session.zone ~= nil then
+        Config.SHAFT_X = session.zone * Config.QUARRY_WIDTH
+        Config.SHAFT_Z = Config.QUARRY_OFFSET_Z
+        Logger.info(string.format(
+            "Pozo individual zona %d: SHAFT_X=%d", session.zone, Config.SHAFT_X
+        ))
+    end
+end
+
+-- Navega en superficie desde la posición actual hasta el pozo de esta turtle.
 local function travelToShaft()
     local sx = Config.SHAFT_X
     local sz = Config.SHAFT_Z
     if Movement.getPos().x == sx and Movement.getPos().z == sz then return end
-    Logger.info(string.format("Yendo al pozo compartido: x=%d z=%d", sx, sz))
-    while Movement.getPos().x ~= sx do
-        sleep(0)
-        Movement.faceDir(Movement.getPos().x < sx and "east" or "west")
-        if turtle.detect() and canDig(turtle.inspect) then turtle.dig() end
-        if not Movement.forward() then sleep(0.5) end
-    end
-    while Movement.getPos().z ~= sz do
-        sleep(0)
-        Movement.faceDir(Movement.getPos().z < sz and "south" or "north")
-        if turtle.detect() and canDig(turtle.inspect) then turtle.dig() end
-        if not Movement.forward() then sleep(0.5) end
-    end
-    Logger.info("En pozo compartido")
+    Logger.info(string.format("Yendo al pozo: x=%d z=%d", sx, sz))
+    navAxis(function() return Movement.getPos().x end, sx, "east", "west")
+    navAxis(function() return Movement.getPos().z end, sz, "south", "north")
+    Logger.info("En pozo")
 end
 
 local function moveToQuarryStart()
@@ -131,24 +164,12 @@ local function returnToBase()
     local sx = Config.SHAFT_X
     local sz = Config.SHAFT_Z
 
-    -- Paso 1: navegar al pozo compartido en profundidad
-    while Movement.getPos().x ~= sx do
-        sleep(0)
-        local d = Movement.getPos().x > sx and "west" or "east"
-        Movement.faceDir(d)
-        if turtle.detect() and canDig(turtle.inspect) then turtle.dig() end
-        if not Movement.forward() then sleep(0.5) end
-    end
-    while Movement.getPos().z ~= sz do
-        sleep(0)
-        local d = Movement.getPos().z > sz and "north" or "south"
-        Movement.faceDir(d)
-        if turtle.detect() and canDig(turtle.inspect) then turtle.dig() end
-        if not Movement.forward() then sleep(0.5) end
-    end
+    -- Paso 1: navegar al pozo individual en profundidad
+    navAxis(function() return Movement.getPos().x end, sx, "east", "west")
+    navAxis(function() return Movement.getPos().z end, sz, "south", "north")
 
     Logger.info(string.format(
-        "En pozo compartido: x=%d z=%d y=%d — subiendo",
+        "En pozo x=%d z=%d y=%d — subiendo",
         Movement.getPos().x, Movement.getPos().z, Movement.getPos().y
     ))
 
@@ -164,8 +185,12 @@ local function returnToBase()
                 if stuckCount > 6 then break end
                 Movement.turnRight()
                 if not turtle.detect() then Movement.forward() end
+            elseif data.name and data.name:find("turtle") then
+                -- Con pozos individuales esto no debería ocurrir, pero por si acaso
+                Logger.warn("Turtle arriba en el pozo — esperando 3s")
+                sleep(3)
             else
-                if canDig(turtle.inspectUp) then turtle.digUp() end
+                turtle.digUp()
                 if not Movement.up() then sleep(0.5) end
             end
         else
@@ -175,20 +200,8 @@ local function returnToBase()
 
     -- Paso 3: navegar en superficie del pozo a HOME (0,0)
     if sx ~= 0 or sz ~= 0 then
-        while Movement.getPos().x ~= 0 do
-            sleep(0)
-            local d = Movement.getPos().x > 0 and "west" or "east"
-            Movement.faceDir(d)
-            if turtle.detect() and canDig(turtle.inspect) then turtle.dig() end
-            if not Movement.forward() then sleep(0.5) end
-        end
-        while Movement.getPos().z ~= 0 do
-            sleep(0)
-            local d = Movement.getPos().z > 0 and "north" or "south"
-            Movement.faceDir(d)
-            if turtle.detect() and canDig(turtle.inspect) then turtle.dig() end
-            if not Movement.forward() then sleep(0.5) end
-        end
+        navAxis(function() return Movement.getPos().x end, 0, "east", "west")
+        navAxis(function() return Movement.getPos().z end, 0, "south", "north")
     end
 
     Movement.faceDir("north")
@@ -223,21 +236,11 @@ local function unloadAndRefuel()
 end
 
 local function travelToWorkXZ(wp)
-    while Movement.getPos().x ~= wp.x do
-        sleep(0)
-        Movement.faceDir(Movement.getPos().x < wp.x and "east" or "west")
-        if turtle.detect() and canDig(turtle.inspect) then turtle.dig() end
-        Movement.forward()
-    end
-    while Movement.getPos().z ~= wp.z do
-        sleep(0)
-        Movement.faceDir(Movement.getPos().z < wp.z and "south" or "north")
-        if turtle.detect() and canDig(turtle.inspect) then turtle.dig() end
-        Movement.forward()
-    end
-    Movement.faceDir(wp.dir)
+    navAxis(function() return Movement.getPos().x end, wp.x, "east", "west")
+    navAxis(function() return Movement.getPos().z end, wp.z, "south", "north")
+    if wp.dir then Movement.faceDir(wp.dir) end
     Logger.info(string.format("Posicion restaurada x=%d y=%d z=%d dir=%s",
-        wp.x, wp.y, wp.z, wp.dir))
+        wp.x, wp.y, wp.z, tostring(wp.dir)))
 end
 
 local function validatePreConditions()
@@ -358,9 +361,10 @@ local function minerMain()
         -- Restaurar zona en Config si fue asignada dinámicamente
         if session.zone ~= nil then
             Config.QUARRY_OFFSET_X = session.zone * Config.QUARRY_WIDTH
+            updateShaftFromZone()   -- pozo individual por zona
             Logger.info(string.format(
-                "Zona restaurada: %d (QUARRY_OFFSET_X=%d)",
-                session.zone, Config.QUARRY_OFFSET_X
+                "Zona restaurada: %d (QUARRY_OFFSET_X=%d SHAFT_X=%d)",
+                session.zone, Config.QUARRY_OFFSET_X, Config.SHAFT_X
             ))
         end
 
@@ -498,9 +502,10 @@ local function minerMain()
                     session.zone         = zoneNum
                     session.controllerID = senderID
                     Config.QUARRY_OFFSET_X = zoneNum * Config.QUARRY_WIDTH
+                    updateShaftFromZone()   -- pozo individual por zona
                     Logger.info(string.format(
-                        "Zona %d asignada. QUARRY_OFFSET_X=%d",
-                        zoneNum, Config.QUARRY_OFFSET_X
+                        "Zona %d asignada. QUARRY_OFFSET_X=%d SHAFT_X=%d",
+                        zoneNum, Config.QUARRY_OFFSET_X, Config.SHAFT_X
                     ))
                     local label = os.getComputerLabel() or ("ID:" .. os.getComputerID())
                     Network.send(senderID, string.format(

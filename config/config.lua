@@ -22,6 +22,29 @@ Config.START_OFFSET_DOWN = 30
 -- (si la turtle arranca en Y=60).
 Config.MAX_LAYERS = 80
 
+-- ── POZO COMPARTIDO ─────────────────────────────────────────────────────────
+-- Coordenada del único pozo de descenso compartido entre todas las turtles.
+-- Offset relativo a HOME (cofre). Todas las turtles bajan por este mismo
+-- pozo y luego caminan horizontalmente a su zona de minería en profundidad.
+--
+--   SHAFT=(0,0): el pozo está justo en HOME → sin desplazamiento extra.
+--   SHAFT=(8,0): el pozo está 8 bloques al este del cofre.
+--
+-- NOTA: solo una turtle puede usar el pozo a la vez. Escalonar los arranques.
+Config.SHAFT_X = 0
+Config.SHAFT_Z = 0
+
+-- ── ZONAS POR TURTLE ────────────────────────────────────────────────────────
+-- Desplazamiento horizontal desde HOME hasta el origen de la zona de minería
+-- de ESTA turtle. Cada turtle tiene valores distintos para no solaparse.
+-- La turtle baja por el POZO COMPARTIDO y luego camina a su zona en profundidad.
+--
+--   Turtle 1 → QUARRY_OFFSET_X = 0,  QUARRY_OFFSET_Z = 0   (mina en X 0..15)
+--   Turtle 2 → QUARRY_OFFSET_X = 16, QUARRY_OFFSET_Z = 0   (mina en X 16..31)
+--   Turtle 3 → QUARRY_OFFSET_X = 32, QUARRY_OFFSET_Z = 0   (mina en X 32..47)
+Config.QUARRY_OFFSET_X = 0
+Config.QUARRY_OFFSET_Z = 0
+
 -- Dimensiones del área a minar por capa (16×16 = un chunk completo).
 Config.QUARRY_WIDTH  = 16   -- número de filas  (dirección Z)
 Config.QUARRY_LENGTH = 16   -- bloques por fila  (dirección X)

@@ -181,14 +181,19 @@ end
 -- Si el camino horizontal está bloqueado por irrompibles, sube.
 -- ============================================================
 
+-- Navega al origen del pozo de esta turtle: (QUARRY_OFFSET_X, QUARRY_OFFSET_Z).
+-- Con offsets en cero es idéntico al comportamiento original.
 local function returnToOriginColumn()
     local MAX_CLIMB = 20
 
-    local function navigateAxis(getVal, posDir, negDir)
+    -- targetVal: coordenada destino en este eje.
+    -- decreaseDir: dirección que reduce el valor (west para X, north para Z).
+    -- increaseDir: dirección que aumenta el valor (east  para X, south para Z).
+    local function navigateAxis(getVal, targetVal, decreaseDir, increaseDir)
         local climbed = 0
-        while getVal() ~= 0 do
-            sleep(0)  -- yield: turtle.inspect no hace yield por sí solo
-            local targetDir = getVal() > 0 and posDir or negDir
+        while getVal() ~= targetVal do
+            sleep(0)
+            local targetDir = getVal() > targetVal and decreaseDir or increaseDir
             Movement.faceDir(targetDir)
             local kind = classifyBlock(turtle.inspect)
             if kind == "air" then
@@ -199,7 +204,7 @@ local function returnToOriginColumn()
                 Movement.forward()
             elseif kind == "unbreakable" then
                 if climbed >= MAX_CLIMB then
-                    Logger.error("No se puede volver al origen: irrompibles")
+                    Logger.error("No se puede volver al origen del pozo: irrompibles")
                     return false
                 end
                 safeDigUp()
@@ -213,9 +218,11 @@ local function returnToOriginColumn()
         return true
     end
 
-    -- Corregir X primero, luego Z
-    navigateAxis(function() return Movement.getPos().x end, "west", "east")
-    navigateAxis(function() return Movement.getPos().z end, "north", "south")
+    -- Navegar a (QUARRY_OFFSET_X, QUARRY_OFFSET_Z): origen del pozo de esta turtle.
+    navigateAxis(function() return Movement.getPos().x end,
+                 Config.QUARRY_OFFSET_X, "west", "east")
+    navigateAxis(function() return Movement.getPos().z end,
+                 Config.QUARRY_OFFSET_Z, "north", "south")
 end
 
 -- ============================================================
@@ -325,7 +332,8 @@ function Quarry.mineLayer(session)
 
     -- Filas vacías consecutivas: si alcanza EMPTY_ROW_THRESHOLD, la capa
     -- se considera vacía (cueva o ya excavada) y se salta al nivel siguiente.
-    local EMPTY_ROW_THRESHOLD = 2
+    -- Con 1: basta una fila sin bloques para saltar inmediatamente.
+    local EMPTY_ROW_THRESHOLD = 1
     local consecutiveEmptyRows = 0
 
     for row = startRow, W - 1 do

@@ -74,14 +74,14 @@ local function snapshot(phase)
     }
 end
 
--- Navega a {x=0, z=0, y=0} (punto inicial / cofre).
+-- Regresa al cofre (HOME = 0,0,0) desde cualquier posición subterránea.
 --
--- ORDEN CORRECTO:
---   1. Navegar horizontalmente a x=0, z=0 en el nivel actual (zona minada = aire)
---   2. Subir por el pozo central hasta y=0
+-- ORDEN:
+--   1. Navegar al pozo compartido (SHAFT_X, SHAFT_Z) en profundidad
+--   2. Subir por el pozo hasta y=0
+--   3. Navegar en superficie del pozo a HOME (0,0)
 --
--- NO subir primero: si la turtle está en x=7, z=3 y sube primero,
--- escava fuera del pozo y llega a la superficie en el lugar equivocado.
+-- Con SHAFT=(0,0) los pasos 1 y 3 son instantáneos.
 local function returnToBase()
     local p = Movement.getPos()
     Logger.info(string.format(
@@ -89,35 +89,31 @@ local function returnToBase()
         p.x, p.y, p.z, Movement.getDir()
     ))
 
-    -- ── Paso 1: navegar a x=0 ────────────────────────────────────
-    while Movement.getPos().x ~= 0 do
-        sleep(0)
-        local d = Movement.getPos().x > 0 and "west" or "east"
-        Movement.faceDir(d)
-        if turtle.detect() then turtle.dig() end
-        if not Movement.forward() then
-            -- bloqueo temporal (entidad, arena cayendo): esperar y reintentar
-            sleep(0.5)
-        end
-    end
+    local sx = Config.SHAFT_X
+    local sz = Config.SHAFT_Z
 
-    -- ── Paso 2: navegar a z=0 ────────────────────────────────────
-    while Movement.getPos().z ~= 0 do
+    -- ── Paso 1: navegar al pozo compartido en profundidad ────────────────────────
+    while Movement.getPos().x ~= sx do
         sleep(0)
-        local d = Movement.getPos().z > 0 and "north" or "south"
+        local d = Movement.getPos().x > sx and "west" or "east"
         Movement.faceDir(d)
         if turtle.detect() then turtle.dig() end
-        if not Movement.forward() then
-            sleep(0.5)
-        end
+        if not Movement.forward() then sleep(0.5) end
+    end
+    while Movement.getPos().z ~= sz do
+        sleep(0)
+        local d = Movement.getPos().z > sz and "north" or "south"
+        Movement.faceDir(d)
+        if turtle.detect() then turtle.dig() end
+        if not Movement.forward() then sleep(0.5) end
     end
 
     Logger.info(string.format(
-        "En columna del pozo: x=%d z=%d y=%d — subiendo",
+        "En pozo compartido: x=%d z=%d y=%d — subiendo",
         Movement.getPos().x, Movement.getPos().z, Movement.getPos().y
     ))
 
-    -- ── Paso 3: subir por el pozo hasta y=0 ─────────────────────
+    -- ── Paso 2: subir por el pozo hasta y=0 ──────────────────────────────────────
     local stuckCount = 0
     while Movement.getPos().y < 0 do
         sleep(0)
@@ -127,7 +123,6 @@ local function returnToBase()
                 Logger.error("Irrompible en techo del pozo en y=" .. Movement.getPos().y)
                 stuckCount = stuckCount + 1
                 if stuckCount > 6 then break end
-                -- Intentar moverse lateralmente para salir del irrompible
                 Movement.turnRight()
                 if not turtle.detect() then Movement.forward() end
             else
@@ -139,11 +134,57 @@ local function returnToBase()
         end
     end
 
+    -- ── Paso 3: navegar en superficie del pozo a HOME (0,0) ─────────────────────
+    if sx ~= 0 or sz ~= 0 then
+        while Movement.getPos().x ~= 0 do
+            sleep(0)
+            local d = Movement.getPos().x > 0 and "west" or "east"
+            Movement.faceDir(d)
+            if turtle.detect() then turtle.dig() end
+            if not Movement.forward() then sleep(0.5) end
+        end
+        while Movement.getPos().z ~= 0 do
+            sleep(0)
+            local d = Movement.getPos().z > 0 and "north" or "south"
+            Movement.faceDir(d)
+            if turtle.detect() then turtle.dig() end
+            if not Movement.forward() then sleep(0.5) end
+        end
+    end
+
     Movement.faceDir("north")
     Logger.info(string.format(
         "BASE ALCANZADA: x=%d y=%d z=%d",
         Movement.getPos().x, Movement.getPos().y, Movement.getPos().z
     ))
+end
+
+-- Navega en superficie desde la posición actual hasta el pozo compartido
+-- (Config.SHAFT_X, Config.SHAFT_Z). Con SHAFT=(0,0) es instantáneo.
+local function travelToShaft()
+    local sx = Config.SHAFT_X
+    local sz = Config.SHAFT_Z
+    if Movement.getPos().x == sx and Movement.getPos().z == sz then return end
+    Logger.info(string.format("Yendo al pozo compartido: x=%d z=%d", sx, sz))
+    while Movement.getPos().x ~= sx do
+        sleep(0)
+        Movement.faceDir(Movement.getPos().x < sx and "east" or "west")
+        if turtle.detect() then turtle.dig() end
+        if not Movement.forward() then sleep(0.5) end
+    end
+    while Movement.getPos().z ~= sz do
+        sleep(0)
+        Movement.faceDir(Movement.getPos().z < sz and "south" or "north")
+        if turtle.detect() then turtle.dig() end
+        if not Movement.forward() then sleep(0.5) end
+    end
+    Logger.info("En pozo compartido")
+end
+
+-- Mueve la turtle al pozo compartido antes de descender.
+-- Si SHAFT=(0,0) y HOME=(0,0) no hace ningún movimiento.
+local function moveToQuarryStart()
+    travelToShaft()
 end
 
 -- Descarga el inventario en el cofre y recarga combustible.
@@ -245,7 +286,8 @@ local function commandListener()
         if senderID and msg then
             local cmd = string.upper(msg)
             Logger.info("Comando remoto de [" .. tostring(senderID) .. "]: " .. cmd)
-            if cmd == "RETURN" or cmd == "DEPOSIT" or cmd == "STATUS" then
+            if cmd == "RETURN" or cmd == "DEPOSIT" or cmd == "STATUS"
+            or cmd == "UPDATE" or cmd == "REBOOT" then
                 _pendingCommand = { cmd = cmd, from = senderID }
                 Network.send(senderID, "ACK:" .. cmd)
             else
@@ -269,7 +311,9 @@ local function minerMain()
     -- Fases válidas del nuevo sistema. Cualquier otra (ej. "SHAFT" del código viejo)
     -- se descarta para evitar loops infinitos sin yield.
     local VALID_PHASES = {
-        PREPARING=true, IDLE=true, DESCENDING_TO_START=true, MINING_LAYER=true,
+        PREPARING=true, IDLE=true,
+        MOVING_TO_QUARRY_START=true,
+        DESCENDING_TO_START=true, MINING_LAYER=true,
         RETURNING_TO_BASE=true, UNLOADING=true, RETURNING_TO_WORK=true,
         DESCENDING_NEXT_LAYER=true, COMPLETE=true, ERROR=true,
     }
@@ -335,7 +379,7 @@ local function minerMain()
 
     elseif phase == "PREPARING" or phase == "IDLE" then
         if not validatePreConditions() then return end
-        session.phase = "DESCENDING_TO_START"
+        session.phase = "MOVING_TO_QUARRY_START"
         phase = session.phase
     end
 
@@ -344,13 +388,38 @@ local function minerMain()
     -- ============================================================
 
     if phase == "RETURNING_TO_WORK" then
-        -- Bajar al nivel correcto y reposicionarse
+        -- Ir al pozo, bajar al nivel correcto y reposicionarse
+        travelToShaft()
         Quarry.descendToLayer(session, session.currentLayer)
         if session.workPosition then
             travelToWorkXZ(session.workPosition)
         end
         phase = "MINING_LAYER"
         session.phase = phase
+
+    elseif phase == "MOVING_TO_QUARRY_START" then
+        -- Reanudar navegación superficial al inicio del quarry
+        moveToQuarryStart()
+        phase = "DESCENDING_TO_START"
+        session.phase = phase
+
+    elseif phase == "MINING_LAYER" then
+        -- Fix de reanudación: la turtle puede haber sido detenida en cualquier punto
+        -- de la capa. Bajamos al nivel correcto y navegamos a la posición exacta
+        -- guardada en el último checkpoint antes de continuar el serpentín.
+        if saved and saved.x ~= nil then
+            Logger.info(string.format(
+                "Reanudando MINING_LAYER capa=%d: navegando a x=%d y=%d z=%d",
+                session.currentLayer, saved.x, saved.y, saved.z
+            ))
+            -- Si el tracker restauró la posición en HOME (y=0), ir al pozo primero.
+            if Movement.getPos().y >= 0 then
+                travelToShaft()
+            end
+            Quarry.descendToLayer(session, session.currentLayer)
+            travelToWorkXZ({ x=saved.x, y=saved.y, z=saved.z, dir=saved.dir or "north" })
+        end
+        -- phase sigue en MINING_LAYER → entra al while normalmente
 
     elseif phase == "DESCENDING_TO_START" then
         -- El bucle principal maneja esta fase
@@ -401,13 +470,29 @@ local function minerMain()
             Logger.info("Procesando comando: " .. cmd)
 
             if cmd == "STATUS" then
-                local p = Movement.getPos()
+                local p     = Movement.getPos()
+                local label = os.getComputerLabel() or ("ID:" .. os.getComputerID())
                 local statusMsg = string.format(
-                    "STATUS phase=%s layer=%d fuel=%d slots_free=%d x=%d y=%d z=%d",
-                    phase, session.currentLayer, Fuel.getLevel(),
+                    "[%s] phase=%s layer=%d fuel=%d free=%d x=%d y=%d z=%d",
+                    label, phase, session.currentLayer, Fuel.getLevel(),
                     16 - Inventory.usedSlots(), p.x, p.y, p.z
                 )
                 Network.send(senderID, statusMsg)
+
+            elseif cmd == "UPDATE" then
+                Logger.info("UPDATE: descargando código y reiniciando por comando remoto")
+                Network.send(senderID, "ACK:UPDATE — actualizando en " .. (os.getComputerLabel() or os.getComputerID()))
+                sleep(0.5)
+                if shell then
+                    pcall(shell.run, "update")
+                end
+                os.reboot()
+
+            elseif cmd == "REBOOT" then
+                Logger.info("REBOOT: reiniciando por comando remoto")
+                Network.send(senderID, "ACK:REBOOT — reiniciando en " .. (os.getComputerLabel() or os.getComputerID()))
+                sleep(0.5)
+                os.reboot()
 
             elseif cmd == "RETURN" then
                 -- Regresar a base y terminar la sesión
@@ -440,6 +525,7 @@ local function minerMain()
                 session.phase = "RETURNING_TO_WORK"
                 State.save(snapshot("RETURNING_TO_WORK"))
                 if session.workPosition then
+                    travelToShaft()
                     Quarry.descendToLayer(session, session.currentLayer)
                     travelToWorkXZ(session.workPosition)
                 end
@@ -451,8 +537,15 @@ local function minerMain()
 
         if phase == "COMPLETE" or phase == "ERROR" then break end
 
+        -- ── MOVING_TO_QUARRY_START ─────────────────────────────
+        if phase == "MOVING_TO_QUARRY_START" then
+            State.save(snapshot("MOVING_TO_QUARRY_START"))
+            moveToQuarryStart()
+            session.phase = "DESCENDING_TO_START"
+            phase = "DESCENDING_TO_START"
+
         -- ── DESCENDING_TO_START ────────────────────────────────
-        if phase == "DESCENDING_TO_START" then
+        elseif phase == "DESCENDING_TO_START" then
             State.save(snapshot("DESCENDING_TO_START"))
             -- Desciende a la Y absoluta de la capa 0: y = -(START_OFFSET_DOWN)
             local result = Quarry.descendToLayer(session, 0)
@@ -462,6 +555,20 @@ local function minerMain()
                 unloadAndRefuel()
                 phase = "COMPLETE"
             else
+                -- Turtle está en el pozo (SHAFT_X, y0, SHAFT_Z).
+                -- Si la zona de minería está en otra posición, caminar hasta ella.
+                local ox = Config.QUARRY_OFFSET_X
+                local oz = Config.QUARRY_OFFSET_Z
+                if ox ~= Config.SHAFT_X or oz ~= Config.SHAFT_Z then
+                    Logger.info(string.format(
+                        "Caminando del pozo a zona de minería: x=%d z=%d", ox, oz))
+                    travelToWorkXZ({
+                        x   = ox,
+                        y   = Movement.getPos().y,
+                        z   = oz,
+                        dir = "east",
+                    })
+                end
                 session.currentLayer = 0
                 session.phase = "MINING_LAYER"
                 phase = "MINING_LAYER"
@@ -504,7 +611,7 @@ local function minerMain()
                 State.save(snapshot("RETURNING_TO_WORK"))
                 if session.workPosition then
                     local wp = session.workPosition
-                    -- Usar descendToLayer para llegar a la Y correcta con detección de bedrock
+                    travelToShaft()
                     Quarry.descendToLayer(session, session.currentLayer)
                     travelToWorkXZ(wp)
                 end

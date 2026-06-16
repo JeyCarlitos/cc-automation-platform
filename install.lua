@@ -22,14 +22,17 @@ local FILES = {
     "core/movement.lua",
     "core/fuel.lua",
     "core/inventory.lua",
+    "core/network.lua",
     "turtles/miner/state.lua",
     "turtles/miner/quarry.lua",
     "turtles/miner/miner.lua",
+    "controller/commander.lua",
 }
 
 local DIRS = {
     "config",
     "core",
+    "controller",
     "turtles",
     "turtles/miner",
     "data",

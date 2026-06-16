@@ -37,10 +37,41 @@ Config.RETURN_AFTER_EACH_LAYER = false
 Config.STOP_ON_BEDROCK = true
 
 -- ============================================================
--- INVENTARIO
+-- INVENTARIO Y FILTRO DE BASURA
 -- ============================================================
 Config.INVENTORY_RESERVE = 2        -- slots reservados para combustible
 Config.CHEST_DIRECTION   = "back"   -- "back" | "left" | "right" | "front"
+
+-- Bloques que se descartan durante la minería (se tiran arriba con dropUp).
+-- Los ores (cualquier nombre con "_ore"), ancient_debris y combustibles
+-- NUNCA se descartan, independientemente de esta lista.
+Config.JUNK_BLOCKS = {
+    "minecraft:cobblestone",
+    "minecraft:cobbled_deepslate",
+    "minecraft:stone",
+    "minecraft:deepslate",
+    "minecraft:dirt",
+    "minecraft:gravel",
+    "minecraft:diorite",
+    "minecraft:andesite",
+    "minecraft:granite",
+    "minecraft:tuff",
+    "minecraft:calcite",
+    "minecraft:basalt",
+    "minecraft:blackstone",
+    "minecraft:netherrack",
+    "minecraft:sand",
+    "minecraft:sandstone",
+    "minecraft:clay",
+}
+
+-- ============================================================
+-- RED INALÁMBRICA
+-- ============================================================
+Config.MODEM_SIDE    = "right"  -- lado donde está el modem (top/bottom/left/right/front/back)
+Config.NETWORK_ID    = 100      -- canal/protocolo para identificar este quarry
+-- ID de la PC controladora (nil = acepta comandos de cualquier ID)
+Config.CONTROLLER_ID = nil
 
 -- ============================================================
 -- PERSISTENCIA

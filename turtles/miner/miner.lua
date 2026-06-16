@@ -28,8 +28,15 @@ local Fuel      = require("core.fuel")
 local Inventory = require("core.inventory")
 local State     = require("turtles.miner.state")
 local Quarry    = require("turtles.miner.quarry")
+local Network   = require("core.network")
 
 local Miner = {}
+
+-- ============================================================
+-- Comando inalámbrico pendiente (compartido entre coroutines)
+-- Escribir solo desde commandListener, leer desde el bucle principal.
+-- ============================================================
+local _pendingCommand = nil   -- {cmd="RETURN"|"DEPOSIT"|"STATUS", from=id}
 
 -- ============================================================
 -- Sesión (se rellena desde disco o desde cero)
@@ -222,10 +229,41 @@ isUnbreakableLocal = function(name)
 end
 
 -- ============================================================
+-- Listener de comandos inalámbricos
+-- Corre en paralelo con la minería usando parallel.waitForAny.
+-- Escribe en _pendingCommand; el bucle principal lo lee y lo procesa.
+-- ============================================================
+
+local function commandListener()
+    if not Network.open() then
+        -- Sin modem: esta coroutine simplemente termina (no bloquea la minería)
+        return
+    end
+    Logger.info("Red: escuchando comandos (RETURN / DEPOSIT / STATUS)")
+    while true do
+        local senderID, msg = Network.receive()
+        if senderID and msg then
+            local cmd = string.upper(msg)
+            Logger.info("Comando remoto de [" .. tostring(senderID) .. "]: " .. cmd)
+            if cmd == "RETURN" or cmd == "DEPOSIT" or cmd == "STATUS" then
+                _pendingCommand = { cmd = cmd, from = senderID }
+                Network.send(senderID, "ACK:" .. cmd)
+            else
+                Network.send(senderID, "ERR:cmd desconocido:" .. msg)
+            end
+        end
+    end
+end
+
+-- ============================================================
 -- Función principal
 -- ============================================================
 
-function Miner.run()
+-- ============================================================
+-- Lógica principal de minería (se ejecuta como coroutine con parallel)
+-- ============================================================
+
+local function minerMain()
     Logger.info("=== CCAP Miner v2 (Chunk Quarry Vertical) ===")
 
     -- Fases válidas del nuevo sistema. Cualquier otra (ej. "SHAFT" del código viejo)
@@ -353,6 +391,65 @@ function Miner.run()
 
     while phase ~= "COMPLETE" and phase ~= "ERROR" do
         sleep(0)  -- yield de seguridad: evita "Too long without yielding"
+
+        -- ── COMANDOS INALÁMBRICOS ──────────────────────────────
+        -- Se procesan entre fases para no interrumpir operaciones atómicas.
+        if _pendingCommand then
+            local cmd      = _pendingCommand.cmd
+            local senderID = _pendingCommand.from
+            _pendingCommand = nil
+            Logger.info("Procesando comando: " .. cmd)
+
+            if cmd == "STATUS" then
+                local p = Movement.getPos()
+                local statusMsg = string.format(
+                    "STATUS phase=%s layer=%d fuel=%d slots_free=%d x=%d y=%d z=%d",
+                    phase, session.currentLayer, Fuel.getLevel(),
+                    16 - Inventory.usedSlots(), p.x, p.y, p.z
+                )
+                Network.send(senderID, statusMsg)
+
+            elseif cmd == "RETURN" then
+                -- Regresar a base y terminar la sesión
+                Logger.info("RETURN: regresando a base por comando remoto")
+                session.returningReason = "COMMAND_RETURN"
+                session.phase = "RETURNING_TO_BASE"
+                State.save(snapshot("RETURNING_TO_BASE"))
+                returnToBase()
+                unloadAndRefuel()
+                Network.send(senderID, "DONE:en base, sesion detenida")
+                phase = "COMPLETE"
+
+            elseif cmd == "DEPOSIT" then
+                -- Guardar posición actual, ir a descargar y volver
+                Logger.info("DEPOSIT: yendo a descargar y volviendo al trabajo")
+                local p = Movement.getPos()
+                session.workPosition = {
+                    x = p.x, y = p.y, z = p.z,
+                    dir = Movement.getDir(),
+                    currentLayer  = session.currentLayer,
+                    currentRow    = session.currentRow,
+                    currentColumn = session.currentColumn,
+                }
+                session.returningReason = "COMMAND_DEPOSIT"
+                session.phase = "RETURNING_TO_BASE"
+                State.save(snapshot("RETURNING_TO_BASE"))
+                returnToBase()
+                unloadAndRefuel()
+                -- Volver al punto de trabajo
+                session.phase = "RETURNING_TO_WORK"
+                State.save(snapshot("RETURNING_TO_WORK"))
+                if session.workPosition then
+                    Quarry.descendToLayer(session, session.currentLayer)
+                    travelToWorkXZ(session.workPosition)
+                end
+                session.phase = "MINING_LAYER"
+                phase = "MINING_LAYER"
+                Network.send(senderID, "DONE:descarga completada, reanudando")
+            end
+        end
+
+        if phase == "COMPLETE" or phase == "ERROR" then break end
 
         -- ── DESCENDING_TO_START ────────────────────────────────
         if phase == "DESCENDING_TO_START" then
@@ -493,6 +590,17 @@ function Miner.run()
         State.save(snapshot("ERROR"))
         print("ERROR: quarry abortado. Revisa data/logs/miner.log")
     end
+end  -- fin de minerMain
+
+-- ============================================================
+-- Punto de entrada público
+-- Corre la minería y el listener inalámbrico en paralelo.
+-- Si no hay modem, commandListener termina inmediatamente y
+-- minerMain sigue solo — la minería no se ve afectada.
+-- ============================================================
+
+function Miner.run()
+    parallel.waitForAny(commandListener, minerMain)
 end
 
 return Miner

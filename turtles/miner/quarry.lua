@@ -355,9 +355,13 @@ function Quarry.mineLayer(session)
                 return saveAndReturn("FUEL_LOW")
             end
             if Inventory.isFull() then
-                Logger.warn(string.format("Inventario lleno en capa %d fila %d col %d",
-                    session.currentLayer, row, col))
-                return saveAndReturn("INVENTORY_FULL")
+                -- Intentar liberar espacio descartando basura antes de volver a base
+                Inventory.dropJunk()
+                if Inventory.isFull() then
+                    Logger.warn(string.format("Inventario lleno (sin basura) en capa %d fila %d col %d",
+                        session.currentLayer, row, col))
+                    return saveAndReturn("INVENTORY_FULL")
+                end
             end
 
             safeDigUp()

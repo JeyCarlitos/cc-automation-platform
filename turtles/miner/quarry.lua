@@ -323,6 +323,11 @@ function Quarry.mineLayer(session)
         return (row % 2 == 0) and "east" or "west"
     end
 
+    -- Filas vacías consecutivas: si alcanza EMPTY_ROW_THRESHOLD, la capa
+    -- se considera vacía (cueva o ya excavada) y se salta al nivel siguiente.
+    local EMPTY_ROW_THRESHOLD = 2
+    local consecutiveEmptyRows = 0
+
     for row = startRow, W - 1 do
         session.currentRow = row
 
@@ -343,6 +348,8 @@ function Quarry.mineLayer(session)
 
         -- Minar los bloques de la fila
         local col = colStart
+        local digsThisRow = 0  -- bloques rotos en esta fila (incluyendo techo)
+
         while (colStep == 1 and col <= colEnd) or (colStep == -1 and col >= colEnd) do
             sleep(0)  -- yield de seguridad por iteración
             session.currentColumn = col
@@ -364,32 +371,55 @@ function Quarry.mineLayer(session)
                 end
             end
 
+            -- Techo
+            local hadCeiling = turtle.detectUp()
             safeDigUp()
+            if hadCeiling then digsThisRow = digsThisRow + 1 end
 
-            -- Avanzar (ignorar irrompibles: volver al origen de la fila no es necesario,
-            -- simplemente dejamos ese bloque y saltamos la celda)
+            -- Avanzar (ignorar irrompibles)
             local kind = classifyBlock(turtle.inspect)
             if kind == "unbreakable" then
                 Logger.warn(string.format("Bloque irrompible en fila %d col %d — saltando celda", row, col))
-                -- No avanzamos, pero sí continuamos el loop (la turtle se queda en sitio)
-                -- Esto significa que esa celda queda sin minar pero no bloqueamos el progreso.
-                -- En la siguiente iteración el loop terminará o girará a la siguiente fila.
-                -- Para que el pattern no se rompa, aquí abortamos la fila y vamos a la siguiente.
                 break
             end
 
+            local hadFront = turtle.detect()
             if not safeDigForward(session) then
                 Logger.warn("No se pudo avanzar en fila " .. row .. " — abortando fila")
                 break
             end
+            if hadFront then digsThisRow = digsThisRow + 1 end
 
             syncPos()
             State.checkpoint(session)
             col = col + colStep
         end
 
-        -- safeDigUp en el último bloque de la fila (posición actual)
+        -- Techo en la posición final de la fila
+        local hadLastCeiling = turtle.detectUp()
         safeDigUp()
+        if hadLastCeiling then digsThisRow = digsThisRow + 1 end
+
+        -- Detectar capa vacía: contar filas sin bloques rompibles
+        if digsThisRow == 0 then
+            consecutiveEmptyRows = consecutiveEmptyRows + 1
+            Logger.debug(string.format(
+                "Fila %d vacia (%d/%d consecutivas)",
+                row, consecutiveEmptyRows, EMPTY_ROW_THRESHOLD
+            ))
+            if consecutiveEmptyRows >= EMPTY_ROW_THRESHOLD then
+                Logger.info(string.format(
+                    "Capa %d parece vacia (%d filas sin bloques) — saltando al siguiente nivel",
+                    session.currentLayer, consecutiveEmptyRows
+                ))
+                session.currentRow    = 0
+                session.currentColumn = 0
+                returnToOriginColumn()
+                return "EMPTY"
+            end
+        else
+            consecutiveEmptyRows = 0  -- resetear al encontrar bloques
+        end
 
         -- Girar y avanzar a la siguiente fila (excepto en la última)
         if row < W - 1 then

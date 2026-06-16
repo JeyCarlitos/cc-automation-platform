@@ -474,7 +474,14 @@ local function minerMain()
 
             local result = Quarry.mineLayer(session)
 
-            if result == "INVENTORY_FULL" or result == "FUEL_LOW" then
+            -- Capa vacía (cueva / ya excavada): bajar directo al siguiente nivel
+            if result == "EMPTY" then
+                Logger.info(string.format("Capa %d vacia, bajando al siguiente nivel", session.currentLayer))
+                session.phase = "DESCENDING_NEXT_LAYER"
+                State.save(snapshot("DESCENDING_NEXT_LAYER"))
+                phase = "DESCENDING_NEXT_LAYER"
+
+            elseif result == "INVENTORY_FULL" or result == "FUEL_LOW" then
                 -- Regresar al cofre y volver exactamente donde estaba
                 session.returningReason = result
                 session.phase = "RETURNING_TO_BASE"

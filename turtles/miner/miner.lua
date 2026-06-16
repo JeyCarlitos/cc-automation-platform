@@ -416,6 +416,34 @@ local function minerMain()
         if not validatePreConditions() then return end
         session.phase = "MOVING_TO_QUARRY_START"
         phase = session.phase
+
+    elseif phase == "ERROR" then
+        -- Recuperación automática: refuelizar del inventario y volver a minar.
+        -- Útil cuando la sesión terminó en ERROR por falta de combustible.
+        Logger.warn(string.format(
+            "Recuperando de ERROR (capa %d, zona %s) — intentando refuelizar...",
+            session.currentLayer, tostring(session.zone)
+        ))
+        Fuel.refuelFromInventory()
+        if Fuel.getLevel() < Config.FUEL_MINIMUM then
+            Logger.error("Sin combustible suficiente para recuperar.")
+            print("Sin combustible. Agrega carbon al inventario y ejecuta startup de nuevo.")
+            return
+        end
+        Logger.info("Fuel OK (" .. Fuel.getLevel() .. "). Regresando a base...")
+        returnToBase()
+        unloadAndRefuel()
+        -- Reanudar desde el inicio de la capa donde estaba (no perder progreso de capas)
+        session.currentRow      = 0
+        session.currentColumn   = 0
+        session.workPosition    = nil
+        session.returningReason = nil
+        phase = "RETURNING_TO_WORK"
+        session.phase = phase
+        State.save(snapshot(phase))
+        Logger.info(string.format(
+            "Recuperado. Reanudando desde capa %d.", session.currentLayer
+        ))
     end
 
     -- ============================================================

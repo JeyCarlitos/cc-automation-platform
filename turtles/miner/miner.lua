@@ -3,17 +3,21 @@
 --
 -- Máquina de estados:
 --
---   PREPARING
+--   WAITING_FOR_ZONE       (nueva sesión: espera ZONE:N del controlador)
 --     ↓
---   DESCENDING_TO_START        (baja START_OFFSET_DOWN bloques)
+--   WAITING_FOR_START      (zona asignada: espera START del controlador)
 --     ↓
---   MINING_LAYER               (serpentín 16×16)
+--   MOVING_TO_QUARRY_START (camina en superficie al pozo compartido)
+--     ↓
+--   DESCENDING_TO_START    (baja START_OFFSET_DOWN bloques)
+--     ↓  (envía AT_DEPTH al controlador)
+--   MINING_LAYER           (serpentín 16×16)
 --     ↓ INVENTORY_FULL / FUEL_LOW / LAYER_COMPLETE
 --   RETURNING_TO_BASE
 --     ↓
 --   UNLOADING
 --     ↓
---   RETURNING_TO_WORK          (si la capa no terminó)
+--   RETURNING_TO_WORK      (si la capa no terminó)
 --     ↓ (si terminó la capa)
 --   DESCENDING_NEXT_LAYER
 --     ↓
@@ -34,12 +38,11 @@ local Miner = {}
 
 -- ============================================================
 -- Comando inalámbrico pendiente (compartido entre coroutines)
--- Escribir solo desde commandListener, leer desde el bucle principal.
 -- ============================================================
-local _pendingCommand = nil   -- {cmd="RETURN"|"DEPOSIT"|"STATUS", from=id}
+local _pendingCommand = nil   -- {cmd, from, zoneNum?}
 
 -- ============================================================
--- Sesión (se rellena desde disco o desde cero)
+-- Sesión
 -- ============================================================
 
 local session = {
@@ -51,6 +54,9 @@ local session = {
     moveCount       = 0,
     returningReason = nil,
     workPosition    = nil,
+    -- Asignación dinámica de zona (Opción A)
+    zone            = nil,   -- número de zona (0=primera, 1=segunda, ...)
+    controllerID    = nil,   -- ID rednet de la PC controladora
 }
 
 -- ============================================================
@@ -71,17 +77,37 @@ local function snapshot(phase)
         moveCount       = session.moveCount,
         returningReason = session.returningReason,
         workPosition    = session.workPosition,
+        zone            = session.zone,
+        controllerID    = session.controllerID,
     }
 end
 
+-- Navega en superficie desde la posición actual hasta el pozo compartido.
+local function travelToShaft()
+    local sx = Config.SHAFT_X
+    local sz = Config.SHAFT_Z
+    if Movement.getPos().x == sx and Movement.getPos().z == sz then return end
+    Logger.info(string.format("Yendo al pozo compartido: x=%d z=%d", sx, sz))
+    while Movement.getPos().x ~= sx do
+        sleep(0)
+        Movement.faceDir(Movement.getPos().x < sx and "east" or "west")
+        if turtle.detect() then turtle.dig() end
+        if not Movement.forward() then sleep(0.5) end
+    end
+    while Movement.getPos().z ~= sz do
+        sleep(0)
+        Movement.faceDir(Movement.getPos().z < sz and "south" or "north")
+        if turtle.detect() then turtle.dig() end
+        if not Movement.forward() then sleep(0.5) end
+    end
+    Logger.info("En pozo compartido")
+end
+
+local function moveToQuarryStart()
+    travelToShaft()
+end
+
 -- Regresa al cofre (HOME = 0,0,0) desde cualquier posición subterránea.
---
--- ORDEN:
---   1. Navegar al pozo compartido (SHAFT_X, SHAFT_Z) en profundidad
---   2. Subir por el pozo hasta y=0
---   3. Navegar en superficie del pozo a HOME (0,0)
---
--- Con SHAFT=(0,0) los pasos 1 y 3 son instantáneos.
 local function returnToBase()
     local p = Movement.getPos()
     Logger.info(string.format(
@@ -92,7 +118,7 @@ local function returnToBase()
     local sx = Config.SHAFT_X
     local sz = Config.SHAFT_Z
 
-    -- ── Paso 1: navegar al pozo compartido en profundidad ────────────────────────
+    -- Paso 1: navegar al pozo compartido en profundidad
     while Movement.getPos().x ~= sx do
         sleep(0)
         local d = Movement.getPos().x > sx and "west" or "east"
@@ -113,7 +139,7 @@ local function returnToBase()
         Movement.getPos().x, Movement.getPos().z, Movement.getPos().y
     ))
 
-    -- ── Paso 2: subir por el pozo hasta y=0 ──────────────────────────────────────
+    -- Paso 2: subir por el pozo hasta y=0
     local stuckCount = 0
     while Movement.getPos().y < 0 do
         sleep(0)
@@ -134,7 +160,7 @@ local function returnToBase()
         end
     end
 
-    -- ── Paso 3: navegar en superficie del pozo a HOME (0,0) ─────────────────────
+    -- Paso 3: navegar en superficie del pozo a HOME (0,0)
     if sx ~= 0 or sz ~= 0 then
         while Movement.getPos().x ~= 0 do
             sleep(0)
@@ -159,37 +185,6 @@ local function returnToBase()
     ))
 end
 
--- Navega en superficie desde la posición actual hasta el pozo compartido
--- (Config.SHAFT_X, Config.SHAFT_Z). Con SHAFT=(0,0) es instantáneo.
-local function travelToShaft()
-    local sx = Config.SHAFT_X
-    local sz = Config.SHAFT_Z
-    if Movement.getPos().x == sx and Movement.getPos().z == sz then return end
-    Logger.info(string.format("Yendo al pozo compartido: x=%d z=%d", sx, sz))
-    while Movement.getPos().x ~= sx do
-        sleep(0)
-        Movement.faceDir(Movement.getPos().x < sx and "east" or "west")
-        if turtle.detect() then turtle.dig() end
-        if not Movement.forward() then sleep(0.5) end
-    end
-    while Movement.getPos().z ~= sz do
-        sleep(0)
-        Movement.faceDir(Movement.getPos().z < sz and "south" or "north")
-        if turtle.detect() then turtle.dig() end
-        if not Movement.forward() then sleep(0.5) end
-    end
-    Logger.info("En pozo compartido")
-end
-
--- Mueve la turtle al pozo compartido antes de descender.
--- Si SHAFT=(0,0) y HOME=(0,0) no hace ningún movimiento.
-local function moveToQuarryStart()
-    travelToShaft()
-end
-
--- Descarga el inventario en el cofre y recarga combustible.
--- El cofre debe estar en la dirección Config.CHEST_DIRECTION
--- relativa al punto de origen {0,0,0} con la turtle mirando norte.
 local function unloadAndRefuel()
     local p = Movement.getPos()
     Logger.info(string.format(
@@ -197,7 +192,6 @@ local function unloadAndRefuel()
         p.x, p.y, p.z, Config.CHEST_DIRECTION
     ))
 
-    -- Orientarse hacia el cofre
     local chest = Config.CHEST_DIRECTION
     if chest == "back" then
         Movement.faceDir("south")
@@ -205,7 +199,7 @@ local function unloadAndRefuel()
         Movement.faceDir("west")
     elseif chest == "right" then
         Movement.faceDir("east")
-    else  -- "front"
+    else
         Movement.faceDir("north")
     end
 
@@ -215,16 +209,13 @@ local function unloadAndRefuel()
     Logger.info("Descarga completa. Fuel: " .. Fuel.getLevel())
 end
 
--- Navega desde x=0,z=0 hasta workPosition.x, workPosition.z en el nivel actual.
 local function travelToWorkXZ(wp)
-    -- Corregir X
     while Movement.getPos().x ~= wp.x do
         sleep(0)
         Movement.faceDir(Movement.getPos().x < wp.x and "east" or "west")
         if turtle.detect() then turtle.dig() end
         Movement.forward()
     end
-    -- Corregir Z
     while Movement.getPos().z ~= wp.z do
         sleep(0)
         Movement.faceDir(Movement.getPos().z < wp.z and "south" or "north")
@@ -236,7 +227,6 @@ local function travelToWorkXZ(wp)
         wp.x, wp.y, wp.z, wp.dir))
 end
 
--- Validar condiciones de inicio.
 local function validatePreConditions()
     Logger.info("Validando condiciones iniciales...")
     if Fuel.getLevel() < Config.FUEL_MINIMUM then
@@ -254,10 +244,13 @@ local function validatePreConditions()
     return true
 end
 
--- ============================================================
--- Nota: isUnbreakableLocal es una copia local para no
--- requerir quarry.lua desde miner.lua en ascendToBase.
--- ============================================================
+-- Helper para enviar notificaciones al controlador
+local function notifyController(msg)
+    if session.controllerID then
+        local label = os.getComputerLabel() or ("ID:" .. os.getComputerID())
+        Network.send(session.controllerID, string.format("[%s] %s", label, msg))
+    end
+end
 
 local UNBREAKABLE_LOCAL = {
     ["minecraft:bedrock"] = true, ["minecraft:barrier"] = true,
@@ -271,25 +264,32 @@ end
 
 -- ============================================================
 -- Listener de comandos inalámbricos
--- Corre en paralelo con la minería usando parallel.waitForAny.
--- Escribe en _pendingCommand; el bucle principal lo lee y lo procesa.
 -- ============================================================
 
 local function commandListener()
-    if not Network.open() then
-        -- Sin modem: esta coroutine simplemente termina (no bloquea la minería)
-        return
-    end
-    Logger.info("Red: escuchando comandos (RETURN / DEPOSIT / STATUS)")
+    if not Network.open() then return end
+    Logger.info("Red: escuchando comandos")
     while true do
         local senderID, msg = Network.receive()
         if senderID and msg then
-            local cmd = string.upper(msg)
-            Logger.info("Comando remoto de [" .. tostring(senderID) .. "]: " .. cmd)
-            if cmd == "RETURN" or cmd == "DEPOSIT" or cmd == "STATUS"
-            or cmd == "UPDATE" or cmd == "REBOOT" then
-                _pendingCommand = { cmd = cmd, from = senderID }
-                Network.send(senderID, "ACK:" .. cmd)
+            local upper = string.upper(msg)
+
+            -- ZONE:N — asignación de zona por el controlador
+            local zoneNum = upper:match("^ZONE:(%d+)$")
+            if zoneNum then
+                _pendingCommand = { cmd = "ZONE", zoneNum = tonumber(zoneNum), from = senderID }
+                Network.send(senderID, "ACK:ZONE:" .. zoneNum)
+
+            -- START — controlador autoriza el descenso
+            elseif upper == "START" then
+                _pendingCommand = { cmd = "START", from = senderID }
+                Network.send(senderID, "ACK:START")
+
+            elseif upper == "STATUS" or upper == "RETURN" or upper == "DEPOSIT"
+                or upper == "UPDATE" or upper == "REBOOT" then
+                _pendingCommand = { cmd = upper, from = senderID }
+                Network.send(senderID, "ACK:" .. upper)
+
             else
                 Network.send(senderID, "ERR:cmd desconocido:" .. msg)
             end
@@ -298,20 +298,15 @@ local function commandListener()
 end
 
 -- ============================================================
--- Función principal
--- ============================================================
-
--- ============================================================
--- Lógica principal de minería (se ejecuta como coroutine con parallel)
+-- Función principal de minería
 -- ============================================================
 
 local function minerMain()
     Logger.info("=== CCAP Miner v2 (Chunk Quarry Vertical) ===")
 
-    -- Fases válidas del nuevo sistema. Cualquier otra (ej. "SHAFT" del código viejo)
-    -- se descarta para evitar loops infinitos sin yield.
     local VALID_PHASES = {
         PREPARING=true, IDLE=true,
+        WAITING_FOR_ZONE=true, WAITING_FOR_START=true,
         MOVING_TO_QUARRY_START=true,
         DESCENDING_TO_START=true, MINING_LAYER=true,
         RETURNING_TO_BASE=true, UNLOADING=true, RETURNING_TO_WORK=true,
@@ -340,18 +335,41 @@ local function minerMain()
         session.moveCount       = saved.moveCount       or 0
         session.returningReason = saved.returningReason
         session.workPosition    = saved.workPosition
+        session.zone            = saved.zone
+        session.controllerID    = saved.controllerID
         Movement.setState(
             { x = saved.x or 0, y = saved.y or 0, z = saved.z or 0 },
             saved.dir or "north"
         )
+
+        -- Restaurar zona en Config si fue asignada dinámicamente
+        if session.zone ~= nil then
+            Config.QUARRY_OFFSET_X = session.zone * Config.QUARRY_WIDTH
+            Logger.info(string.format(
+                "Zona restaurada: %d (QUARRY_OFFSET_X=%d)",
+                session.zone, Config.QUARRY_OFFSET_X
+            ))
+        end
+
         Logger.info(string.format(
-            "Reanudando: phase=%s capa=%d fila=%d col=%d",
+            "Reanudando: phase=%s capa=%d zona=%s",
             session.phase, session.currentLayer,
-            session.currentRow, session.currentColumn
+            tostring(session.zone)
         ))
     else
         Movement.resetState()
         Logger.info("Nueva sesion de quarry")
+
+        -- Nueva sesión: registrarse con el controlador para obtener zona
+        if Network.open() then
+            Logger.info("Enviando REGISTER al controlador...")
+            Network.broadcast("REGISTER")
+            session.phase = "WAITING_FOR_ZONE"
+        else
+            -- Sin modem: usar QUARRY_OFFSET_X de config directamente
+            Logger.warn("Sin modem. Zona fija: QUARRY_OFFSET_X=" .. Config.QUARRY_OFFSET_X)
+            session.phase = "PREPARING"
+        end
     end
 
     -- ============================================================
@@ -388,7 +406,6 @@ local function minerMain()
     -- ============================================================
 
     if phase == "RETURNING_TO_WORK" then
-        -- Ir al pozo, bajar al nivel correcto y reposicionarse
         travelToShaft()
         Quarry.descendToLayer(session, session.currentLayer)
         if session.workPosition then
@@ -398,36 +415,28 @@ local function minerMain()
         session.phase = phase
 
     elseif phase == "MOVING_TO_QUARRY_START" then
-        -- Reanudar navegación superficial al inicio del quarry
         moveToQuarryStart()
         phase = "DESCENDING_TO_START"
         session.phase = phase
 
     elseif phase == "MINING_LAYER" then
-        -- Fix de reanudación: la turtle puede haber sido detenida en cualquier punto
-        -- de la capa. Bajamos al nivel correcto y navegamos a la posición exacta
-        -- guardada en el último checkpoint antes de continuar el serpentín.
         if saved and saved.x ~= nil then
             Logger.info(string.format(
                 "Reanudando MINING_LAYER capa=%d: navegando a x=%d y=%d z=%d",
                 session.currentLayer, saved.x, saved.y, saved.z
             ))
-            -- Si el tracker restauró la posición en HOME (y=0), ir al pozo primero.
             if Movement.getPos().y >= 0 then
                 travelToShaft()
             end
             Quarry.descendToLayer(session, session.currentLayer)
             travelToWorkXZ({ x=saved.x, y=saved.y, z=saved.z, dir=saved.dir or "north" })
         end
-        -- phase sigue en MINING_LAYER → entra al while normalmente
 
     elseif phase == "DESCENDING_TO_START" then
-        -- El bucle principal maneja esta fase
-        -- (no hacer nada aquí, dejar que entre al while)
+        -- el bucle principal lo maneja
 
     elseif phase == "DESCENDING_NEXT_LAYER" then
         local nextLayer = session.currentLayer + 1
-        -- Verificar límite de capas al reanudar
         if Config.MAX_LAYERS and nextLayer >= Config.MAX_LAYERS then
             Logger.info("Límite de capas alcanzado al reanudar. Regresando a base.")
             returnToBase()
@@ -452,6 +461,8 @@ local function minerMain()
         session.currentColumn   = 0
         session.phase = "MINING_LAYER"
         phase = "MINING_LAYER"
+
+    -- WAITING_FOR_ZONE / WAITING_FOR_START: el bucle principal los maneja
     end
 
     -- ============================================================
@@ -459,54 +470,83 @@ local function minerMain()
     -- ============================================================
 
     while phase ~= "COMPLETE" and phase ~= "ERROR" do
-        sleep(0)  -- yield de seguridad: evita "Too long without yielding"
+        sleep(0)
 
         -- ── COMANDOS INALÁMBRICOS ──────────────────────────────
-        -- Se procesan entre fases para no interrumpir operaciones atómicas.
         if _pendingCommand then
             local cmd      = _pendingCommand.cmd
             local senderID = _pendingCommand.from
+            local zoneNum  = _pendingCommand.zoneNum  -- solo para ZONE
             _pendingCommand = nil
-            Logger.info("Procesando comando: " .. cmd)
 
-            if cmd == "STATUS" then
+            -- ── ZONE:N — asignación dinámica de zona ──────────
+            if cmd == "ZONE" then
+                if phase == "WAITING_FOR_ZONE" and zoneNum ~= nil then
+                    session.zone         = zoneNum
+                    session.controllerID = senderID
+                    Config.QUARRY_OFFSET_X = zoneNum * Config.QUARRY_WIDTH
+                    Logger.info(string.format(
+                        "Zona %d asignada. QUARRY_OFFSET_X=%d",
+                        zoneNum, Config.QUARRY_OFFSET_X
+                    ))
+                    local label = os.getComputerLabel() or ("ID:" .. os.getComputerID())
+                    Network.send(senderID, string.format(
+                        "[%s] ZONE:%d confirmada — esperando START", label, zoneNum
+                    ))
+                    session.phase = "WAITING_FOR_START"
+                    phase = "WAITING_FOR_START"
+                    State.save(snapshot(phase))
+                end
+
+            -- ── START — autorización de descenso ──────────────
+            elseif cmd == "START" then
+                if phase == "WAITING_FOR_START" then
+                    session.controllerID = senderID
+                    Logger.info("START recibido — zona " .. tostring(session.zone))
+                    if not validatePreConditions() then
+                        notifyController("ERROR:pre-condiciones fallidas")
+                        phase = "ERROR"
+                    else
+                        session.phase = "MOVING_TO_QUARRY_START"
+                        phase = "MOVING_TO_QUARRY_START"
+                        State.save(snapshot(phase))
+                    end
+                end
+
+            elseif cmd == "STATUS" then
                 local p     = Movement.getPos()
                 local label = os.getComputerLabel() or ("ID:" .. os.getComputerID())
-                local statusMsg = string.format(
-                    "[%s] phase=%s layer=%d fuel=%d free=%d x=%d y=%d z=%d",
-                    label, phase, session.currentLayer, Fuel.getLevel(),
+                Network.send(senderID, string.format(
+                    "[%s] phase=%s zone=%s layer=%d fuel=%d free=%d x=%d y=%d z=%d",
+                    label, phase, tostring(session.zone),
+                    session.currentLayer, Fuel.getLevel(),
                     16 - Inventory.usedSlots(), p.x, p.y, p.z
-                )
-                Network.send(senderID, statusMsg)
+                ))
 
             elseif cmd == "UPDATE" then
-                Logger.info("UPDATE: descargando código y reiniciando por comando remoto")
-                Network.send(senderID, "ACK:UPDATE — actualizando en " .. (os.getComputerLabel() or os.getComputerID()))
+                Logger.info("UPDATE: descargando código y reiniciando")
+                notifyController("UPDATE — actualizando...")
                 sleep(0.5)
-                if shell then
-                    pcall(shell.run, "update")
-                end
+                if shell then pcall(shell.run, "update") end
                 os.reboot()
 
             elseif cmd == "REBOOT" then
                 Logger.info("REBOOT: reiniciando por comando remoto")
-                Network.send(senderID, "ACK:REBOOT — reiniciando en " .. (os.getComputerLabel() or os.getComputerID()))
+                notifyController("REBOOT — reiniciando...")
                 sleep(0.5)
                 os.reboot()
 
             elseif cmd == "RETURN" then
-                -- Regresar a base y terminar la sesión
                 Logger.info("RETURN: regresando a base por comando remoto")
                 session.returningReason = "COMMAND_RETURN"
                 session.phase = "RETURNING_TO_BASE"
                 State.save(snapshot("RETURNING_TO_BASE"))
                 returnToBase()
                 unloadAndRefuel()
-                Network.send(senderID, "DONE:en base, sesion detenida")
+                notifyController("DONE:en base, sesion detenida")
                 phase = "COMPLETE"
 
             elseif cmd == "DEPOSIT" then
-                -- Guardar posición actual, ir a descargar y volver
                 Logger.info("DEPOSIT: yendo a descargar y volviendo al trabajo")
                 local p = Movement.getPos()
                 session.workPosition = {
@@ -517,11 +557,9 @@ local function minerMain()
                     currentColumn = session.currentColumn,
                 }
                 session.returningReason = "COMMAND_DEPOSIT"
-                session.phase = "RETURNING_TO_BASE"
                 State.save(snapshot("RETURNING_TO_BASE"))
                 returnToBase()
                 unloadAndRefuel()
-                -- Volver al punto de trabajo
                 session.phase = "RETURNING_TO_WORK"
                 State.save(snapshot("RETURNING_TO_WORK"))
                 if session.workPosition then
@@ -531,14 +569,25 @@ local function minerMain()
                 end
                 session.phase = "MINING_LAYER"
                 phase = "MINING_LAYER"
-                Network.send(senderID, "DONE:descarga completada, reanudando")
+                notifyController("DONE:descarga completada, reanudando")
             end
         end
 
         if phase == "COMPLETE" or phase == "ERROR" then break end
 
+        -- ── WAITING_FOR_ZONE ───────────────────────────────────
+        -- commandListener recibe ZONE:N y lo pone en _pendingCommand.
+        -- El bloque de comandos de arriba ya lo procesa; aquí solo cedemos CPU.
+        if phase == "WAITING_FOR_ZONE" then
+            sleep(0.5)
+
+        -- ── WAITING_FOR_START ──────────────────────────────────
+        -- commandListener recibe START y lo pone en _pendingCommand.
+        elseif phase == "WAITING_FOR_START" then
+            sleep(0.5)
+
         -- ── MOVING_TO_QUARRY_START ─────────────────────────────
-        if phase == "MOVING_TO_QUARRY_START" then
+        elseif phase == "MOVING_TO_QUARRY_START" then
             State.save(snapshot("MOVING_TO_QUARRY_START"))
             moveToQuarryStart()
             session.phase = "DESCENDING_TO_START"
@@ -547,7 +596,6 @@ local function minerMain()
         -- ── DESCENDING_TO_START ────────────────────────────────
         elseif phase == "DESCENDING_TO_START" then
             State.save(snapshot("DESCENDING_TO_START"))
-            -- Desciende a la Y absoluta de la capa 0: y = -(START_OFFSET_DOWN)
             local result = Quarry.descendToLayer(session, 0)
             if result == "BEDROCK" then
                 Logger.warn("Bedrock al bajar al offset inicial. Terminando.")
@@ -555,20 +603,23 @@ local function minerMain()
                 unloadAndRefuel()
                 phase = "COMPLETE"
             else
-                -- Turtle está en el pozo (SHAFT_X, y0, SHAFT_Z).
-                -- Si la zona de minería está en otra posición, caminar hasta ella.
+                -- Caminar del pozo a la zona de minería (si son distintos)
                 local ox = Config.QUARRY_OFFSET_X
                 local oz = Config.QUARRY_OFFSET_Z
                 if ox ~= Config.SHAFT_X or oz ~= Config.SHAFT_Z then
                     Logger.info(string.format(
-                        "Caminando del pozo a zona de minería: x=%d z=%d", ox, oz))
-                    travelToWorkXZ({
-                        x   = ox,
-                        y   = Movement.getPos().y,
-                        z   = oz,
-                        dir = "east",
-                    })
+                        "Caminando del pozo a zona %d: x=%d z=%d",
+                        session.zone or 0, ox, oz
+                    ))
+                    travelToWorkXZ({ x=ox, y=Movement.getPos().y, z=oz, dir="east" })
                 end
+
+                -- Notificar al controlador: listo para minar, puede bajar la siguiente
+                notifyController(string.format(
+                    "AT_DEPTH zona=%d y=%d",
+                    session.zone or 0, Movement.getPos().y
+                ))
+
                 session.currentLayer = 0
                 session.phase = "MINING_LAYER"
                 phase = "MINING_LAYER"
@@ -577,19 +628,17 @@ local function minerMain()
         -- ── MINING_LAYER ───────────────────────────────────────
         elseif phase == "MINING_LAYER" then
             State.save(snapshot("MINING_LAYER"))
-            Logger.info(string.format("=== Capa %d ===", session.currentLayer))
+            Logger.info(string.format("=== Capa %d (zona %s) ===",
+                session.currentLayer, tostring(session.zone)))
 
             local result = Quarry.mineLayer(session)
 
-            -- Capa vacía (cueva / ya excavada): bajar directo al siguiente nivel
             if result == "EMPTY" then
-                Logger.info(string.format("Capa %d vacia, bajando al siguiente nivel", session.currentLayer))
                 session.phase = "DESCENDING_NEXT_LAYER"
                 State.save(snapshot("DESCENDING_NEXT_LAYER"))
                 phase = "DESCENDING_NEXT_LAYER"
 
             elseif result == "INVENTORY_FULL" or result == "FUEL_LOW" then
-                -- Regresar al cofre y volver exactamente donde estaba
                 session.returningReason = result
                 session.phase = "RETURNING_TO_BASE"
                 State.save(snapshot("RETURNING_TO_BASE"))
@@ -598,7 +647,6 @@ local function minerMain()
                 session.phase = "UNLOADING"
                 unloadAndRefuel()
 
-                -- Verificar fuel suficiente para continuar
                 local fuelNeeded = Config.QUARRY_WIDTH * Config.QUARRY_LENGTH + 50
                 if not Fuel.ensureFuel(fuelNeeded) then
                     Logger.error("Sin fuel suficiente tras reabastecimiento. Abortando.")
@@ -606,31 +654,25 @@ local function minerMain()
                     break
                 end
 
-                -- Volver al punto exacto de trabajo
                 session.phase = "RETURNING_TO_WORK"
                 State.save(snapshot("RETURNING_TO_WORK"))
                 if session.workPosition then
-                    local wp = session.workPosition
                     travelToShaft()
                     Quarry.descendToLayer(session, session.currentLayer)
-                    travelToWorkXZ(wp)
+                    travelToWorkXZ(session.workPosition)
                 end
                 session.phase = "MINING_LAYER"
                 phase = "MINING_LAYER"
 
-            else  -- result == "COMPLETE"
-                -- Capa terminada — solo subir si RETURN_AFTER_EACH_LAYER está activo
+            else  -- COMPLETE
                 if Config.RETURN_AFTER_EACH_LAYER then
                     session.returningReason = "LAYER_COMPLETE"
                     session.phase = "RETURNING_TO_BASE"
                     State.save(snapshot("RETURNING_TO_BASE"))
                     returnToBase()
-
                     session.phase = "UNLOADING"
                     unloadAndRefuel()
                 end
-
-                -- Intentar bajar a la siguiente capa
                 session.phase = "DESCENDING_NEXT_LAYER"
                 State.save(snapshot("DESCENDING_NEXT_LAYER"))
                 phase = "DESCENDING_NEXT_LAYER"
@@ -640,7 +682,6 @@ local function minerMain()
         elseif phase == "DESCENDING_NEXT_LAYER" then
             local nextLayer = session.currentLayer + 1
 
-            -- Verificar límite de capas (MAX_LAYERS)
             if Config.MAX_LAYERS and nextLayer >= Config.MAX_LAYERS then
                 Logger.info(string.format(
                     "Límite de capas alcanzado (%d). Finalizando quarry.",
@@ -653,9 +694,6 @@ local function minerMain()
                 unloadAndRefuel()
                 phase = "COMPLETE"
             else
-                -- La siguiente capa tiene un Y absoluto basado en su número.
-                -- Funciona tanto si la turtle está en y=0 (RETURN_AFTER_EACH_LAYER)
-                -- como si está en la capa anterior (sin retorno entre capas).
                 local result = Quarry.descendToLayer(session, nextLayer)
 
                 if result == "BEDROCK" then
@@ -678,8 +716,6 @@ local function minerMain()
             end
 
         else
-            -- Fase no reconocida: no debería llegar aquí, pero si ocurre
-            -- evitamos un loop infinito sin yield.
             Logger.error("Fase no reconocida en bucle: " .. tostring(phase))
             phase = "ERROR"
         end
@@ -691,6 +727,10 @@ local function minerMain()
 
     if phase == "COMPLETE" then
         State.clear()
+        notifyController(string.format(
+            "COMPLETE zona=%d capas=%d",
+            session.zone or 0, session.currentLayer
+        ))
         Logger.info(string.format(
             "=== Quarry completado. %d capas minadas ===",
             session.currentLayer
@@ -704,13 +744,10 @@ local function minerMain()
         State.save(snapshot("ERROR"))
         print("ERROR: quarry abortado. Revisa data/logs/miner.log")
     end
-end  -- fin de minerMain
+end
 
 -- ============================================================
 -- Punto de entrada público
--- Corre la minería y el listener inalámbrico en paralelo.
--- Si no hay modem, commandListener termina inmediatamente y
--- minerMain sigue solo — la minería no se ve afectada.
 -- ============================================================
 
 function Miner.run()

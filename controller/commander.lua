@@ -193,11 +193,12 @@ local function printHeader()
     clrln(colors.cyan, "  CCAP Commander  —  Control Multi-Turtle")
     clrln(colors.cyan, "==========================================")
     print("")
-    clrln(colors.yellow, "  Comandos  (agrega [id] para una turtle):")
-    print("   s  [id]  — estado actual")
+    clrln(colors.yellow, "  Comandos:")
+    clr(colors.lime, "   init     "); clrln(colors.white, "— asignar zonas e iniciar descenso")
+    print("   s  [id]  — estado actual de todas o una")
     print("   r  [id]  — regresar a base y parar")
     print("   d  [id]  — descargar y seguir minando")
-    print("   u  [id]  — actualizar código (GitHub) y reiniciar")
+    print("   u  [id]  — actualizar código y reiniciar")
     print("   rb [id]  — reiniciar turtle")
     print("   list     — turtles conocidas")
     print("   q        — salir")
@@ -208,6 +209,119 @@ end
 
 -- ============================================================
 -- Parser de entrada
+-- ============================================================
+
+-- ============================================================
+-- Comando INIT — registro de zonas y descenso secuencial
+-- ============================================================
+
+local function runInit()
+    clrln(colors.cyan, "=== Inicialización — Asignación de Zonas ===")
+    print("")
+    print("Las turtles deben estar encendidas (startup corriendo).")
+    print("Esperando registros... [Enter] para terminar la espera.")
+    print("")
+
+    local assignments = {}  -- [turtleID] = zoneNum
+    local nextZone    = 0
+    local finished    = false
+
+    -- Escucha mensajes REGISTER mientras no se presione Enter
+    local function listenForRegisters()
+        while not finished do
+            local id, msg, proto = rednet.receive(PROTOCOL, 1)
+            if id and msg and string.upper(msg) == "REGISTER" then
+                if not assignments[id] then
+                    local zone = nextZone
+                    nextZone   = nextZone + 1
+                    assignments[id] = zone
+                    registerTurtle(id)
+                    rednet.send(id, "ZONE:" .. zone, PROTOCOL)
+                    clr(colors.lime,  string.format("  [ID:%-5d]", id))
+                    clrln(colors.white, string.format(
+                        " → Zona %d  (X: %d..%d)",
+                        zone, zone * 16, zone * 16 + 15
+                    ))
+                end
+            end
+        end
+    end
+
+    local function waitForEnter()
+        read()
+        finished = true
+    end
+
+    parallel.waitForAny(listenForRegisters, waitForEnter)
+
+    -- Contar registradas
+    local count = 0
+    for _ in pairs(assignments) do count = count + 1 end
+
+    if count == 0 then
+        clrln(colors.red, "  Sin turtles registradas.")
+        clrln(colors.lightGray, "  Asegúrate de que estén encendidas y en rango del modem.")
+        print("")
+        return
+    end
+
+    print("")
+    clrln(colors.yellow, string.format("  %d turtle(s) registradas.", count))
+    print("  Presiona Enter para iniciar el descenso secuencial...")
+    read()
+    print("")
+
+    -- Ordenar por zona y enviar START de una en una
+    local ordered = {}
+    for id, zone in pairs(assignments) do
+        ordered[zone + 1] = { id = id, zone = zone }
+    end
+
+    for i = 1, count do
+        local entry = ordered[i]
+        if not entry then break end
+
+        clr(colors.yellow, string.format(
+            "  → START Zona %d [ID:%d] ...", entry.zone, entry.id
+        ))
+        rednet.send(entry.id, "START", PROTOCOL)
+
+        -- Esperar AT_DEPTH de esta turtle (máx 5 minutos)
+        local arrived = false
+        local deadline = os.clock() + 300
+        while not arrived and os.clock() < deadline do
+            local t = os.startTimer(math.max(0.1, deadline - os.clock()))
+            local event, p1, p2, p3 = os.pullEvent()
+            if event == "rednet_message" then
+                local sid, msg, proto = p1, p2, p3
+                os.cancelTimer(t)
+                if proto == PROTOCOL and sid == entry.id
+                        and tostring(msg):find("AT_DEPTH") then
+                    arrived = true
+                    clrln(colors.lime,  " ✓")
+                    clr(colors.lightGray, "    ")
+                    clrln(colors.white, tostring(msg))
+                end
+            elseif event == "timer" and p1 == t then
+                break
+            else
+                os.cancelTimer(t)
+            end
+        end
+
+        if not arrived then
+            clrln(colors.red, " TIMEOUT")
+            clrln(colors.orange, "  La turtle no confirmó llegada. Revisa logs.")
+        end
+    end
+
+    print("")
+    clrln(colors.lime, "  ¡Zonas asignadas! Usa 's' para ver el estado.")
+    print("")
+end
+
+-- ============================================================
+-- Mapa de comandos hacia turtles
 -- ============================================================
 
 local CMD_MAP = {
@@ -227,9 +341,10 @@ local function parseInput(raw)
     local input = raw:lower():match("^%s*(.-)%s*$")
 
     -- Comandos especiales sin ID
-    if input == "list"              then return "LIST", nil end
+    if input == "list"                 then return "LIST", nil end
+    if input == "init"                 then return "INIT", nil end
     if input == "q" or input == "quit" then return "QUIT", nil end
-    if input == ""                  then return "EMPTY", nil end
+    if input == ""                     then return "EMPTY", nil end
 
     -- "cmd" o "cmd id"
     local word, rest = input:match("^(%S+)%s*(.*)$")
@@ -265,6 +380,7 @@ while true do
 
     if     cmd == "QUIT"    then break
     elseif cmd == "LIST"    then listTurtles()
+    elseif cmd == "INIT"    then runInit()
     elseif cmd == "EMPTY"   then -- ignorar
     elseif cmd == "INVALID" then -- ya mostró error
     elseif cmd ~= nil       then runCmd(cmd, targetId)

@@ -1,7 +1,8 @@
 -- controller/commander.lua
 -- Panel de control multi-turtle para CCAP.
+-- Compatible con PC estática y pocket computer (auto-detecta el modem).
 --
--- Cómo instalar en la PC estática:
+-- Cómo instalar:
 --   wget https://raw.githubusercontent.com/JeyCarlitos/cc-automation-platform/main/install.lua install
 --   install
 --   commander
@@ -19,7 +20,15 @@
 --
 --  [id] es el número de ID de la turtle (omítelo para enviar a TODAS).
 
-local MODEM_SIDE = "right"   -- cambia si tu modem está en otro lado
+-- Auto-detectar modem.
+-- Pocket computer: el upgrade de wireless modem aparece en "back".
+-- PC estática: suele estar en "right" u otro lado.
+local MODEM_SIDE = (function()
+    for _, side in ipairs({"back","right","left","top","bottom","front"}) do
+        if peripheral.getType(side) == "modem" then return side end
+    end
+end)()
+
 local PROTOCOL   = "ccap"
 local TIMEOUT    = 10        -- segundos esperando respuestas
 
@@ -27,9 +36,10 @@ local TIMEOUT    = 10        -- segundos esperando respuestas
 -- Inicialización
 -- ============================================================
 
-if not peripheral.isPresent(MODEM_SIDE) then
-    print("[ERROR] No hay modem en lado '" .. MODEM_SIDE .. "'.")
-    print("Cambia MODEM_SIDE al inicio de commander.lua y actualiza.")
+if not MODEM_SIDE then
+    print("[ERROR] No se encontró modem.")
+    print("  Pocket computer : equipa el upgrade wireless.")
+    print("  PC estática     : conecta un modem inalámbrico.")
     return
 end
 
@@ -177,36 +187,61 @@ local function listTurtles()
     for _, id in ipairs(ids) do
         local t   = registry[id]
         local age = t.lastSeen and math.floor(os.clock() - t.lastSeen) or "?"
-        clr(colors.lime,      string.format("  [ID:%-4d]  ", id))
-        clr(colors.white,     string.format("%-24s", t.label or "(sin label)"))
-        clrln(colors.lightGray, " hace " .. age .. "s")
+        if COMPACT then
+            clr(colors.lime, string.format("[%d] ", id))
+            clrln(colors.white, (t.label or "?") .. " +" .. age .. "s")
+        else
+            clr(colors.lime,      string.format("  [ID:%-4d]  ", id))
+            clr(colors.white,     string.format("%-24s", t.label or "(sin label)"))
+            clrln(colors.lightGray, " hace " .. age .. "s")
+        end
     end
     print("")
 end
 
 -- ============================================================
--- Header
+-- Header (adaptativo: compacto para pocket computer, 26 cols)
 -- ============================================================
+
+local TERM_W = term.getSize()
+local COMPACT = TERM_W <= 26  -- pocket computer / advanced pocket = 26 cols
 
 local function printHeader()
     term.clear()
     term.setCursorPos(1, 1)
-    clrln(colors.cyan, "==========================================")
-    clrln(colors.cyan, "  CCAP Commander  —  Control Multi-Turtle")
-    clrln(colors.cyan, "==========================================")
-    print("")
-    clrln(colors.yellow, "  Comandos:")
-    clr(colors.lime,      "   init          "); clrln(colors.white, "— arranque: asignar zonas y bajar")
-    clr(colors.lime,      "   zone <id> <N> "); clrln(colors.white, "— reemplazar turtle destruida")
-    print("   s  [id]       — estado actual")
-    print("   r  [id]       — regresar a base y parar")
-    print("   d  [id]       — descargar y seguir minando")
-    print("   u  [id]       — actualizar código y reiniciar")
-    print("   rb [id]       — reiniciar turtle")
-    print("   list          — turtles conocidas")
-    print("   q             — salir")
-    print("")
-    clrln(colors.lightGray, "  Omite [id] para enviar a TODAS.")
+    if COMPACT then
+        clrln(colors.cyan,      "=== CCAP Commander ===")
+        clrln(colors.lightGray, "modem: " .. MODEM_SIDE)
+        print("")
+        clrln(colors.yellow,    "Comandos:")
+        clr(colors.lime, "init "); clrln(colors.white, "— zonas + descenso")
+        clr(colors.lime, "zone <id> <N> "); clrln(colors.white, "— reemplazar")
+        clr(colors.lime, "s "); clrln(colors.white, "[id] — estado")
+        clr(colors.lime, "r "); clrln(colors.white, "[id] — volver a base")
+        clr(colors.lime, "d "); clrln(colors.white, "[id] — descargar")
+        clr(colors.lime, "u "); clrln(colors.white, "[id] — actualizar")
+        clr(colors.lime, "rb "); clrln(colors.white, "[id] — reiniciar")
+        clr(colors.lime, "list "); clrln(colors.white, "— ver turtles")
+        clr(colors.lime, "q "); clrln(colors.white, "— salir")
+        clrln(colors.lightGray, "(sin id = TODAS)")
+    else
+        clrln(colors.cyan, "==========================================")
+        clrln(colors.cyan, "  CCAP Commander  —  Control Multi-Turtle")
+        clrln(colors.cyan, "==========================================")
+        print("")
+        clrln(colors.yellow, "  Comandos:")
+        clr(colors.lime,      "   init          "); clrln(colors.white, "— arranque: asignar zonas y bajar")
+        clr(colors.lime,      "   zone <id> <N> "); clrln(colors.white, "— reemplazar turtle destruida")
+        print("   s  [id]       — estado actual")
+        print("   r  [id]       — regresar a base y parar")
+        print("   d  [id]       — descargar y seguir minando")
+        print("   u  [id]       — actualizar código y reiniciar")
+        print("   rb [id]       — reiniciar turtle")
+        print("   list          — turtles conocidas")
+        print("   q             — salir")
+        print("")
+        clrln(colors.lightGray, "  Omite [id] para enviar a TODAS.")
+    end
     print("")
 end
 

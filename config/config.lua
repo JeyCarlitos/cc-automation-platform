@@ -49,8 +49,10 @@ Config.QUARRY_OFFSET_Z = 0
 Config.QUARRY_WIDTH  = 16   -- número de filas  (dirección Z)
 Config.QUARRY_LENGTH = 16   -- bloques por fila  (dirección X)
 
--- Altura que baja entre capas (normalmente 1).
-Config.LAYER_HEIGHT = 1
+-- Altura que baja entre capas.
+-- Con 3: cada pasada excava 3 bloques de alto (techo, nivel, suelo) con
+-- cobertura completa y 3× menos viajes de descenso. Recomendado con safeDigFloor.
+Config.LAYER_HEIGHT = 3
 
 -- Si true, regresa al cofre y descarga después de cada capa completa.
 -- false = solo regresa al llenarse el inventario o quedarse sin fuel.

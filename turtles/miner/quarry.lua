@@ -167,7 +167,7 @@ local function safeDigDown(session)
     return false
 end
 
--- Excavar techo sin moverse (limpieza de altura doble).
+-- Excavar techo sin moverse (limpieza de altura doble/triple).
 local function safeDigUp()
     local kind = classifyBlock(turtle.inspectUp)
     if kind == "turtle" then
@@ -189,9 +189,50 @@ local function safeDigUp()
         Logger.warn("No se pudo sellar lava en techo")
         return
     elseif kind == "unbreakable" then
-        return  -- dejar techo irrompible sin tocar
+        return
     end
     turtle.digUp()
+end
+
+-- Excavar suelo sin moverse (minería de 3 bloques de alto).
+-- Solo excava — NO mueve la turtle hacia abajo.
+local function safeDigFloor()
+    local kind = classifyBlock(turtle.inspectDown)
+    if kind == "turtle" then
+        Logger.warn("Turtle detectada en el suelo — esperando 3s")
+        sleep(3)
+        return
+    elseif kind == "lava" then
+        sealLava(turtle.inspectDown, turtle.placeDown, "suelo")
+        return
+    elseif kind == "unbreakable" or kind == "air" then
+        return
+    end
+    -- Grava/arena que puede caer en cascada
+    local digs = 0
+    while turtle.detectDown() and digs < 5 do
+        turtle.digDown()
+        sleep(0.2)
+        digs = digs + 1
+    end
+end
+
+-- Chequeo rápido de cueva: devuelve true si no hay bloques en ninguna
+-- dirección cardinal desde la posición actual (entrada a cueva grande).
+-- La turtle queda orientada al east al salir.
+local function isCaveEntry()
+    if turtle.detectUp()   then return false end
+    if turtle.detectDown() then return false end
+    Movement.faceDir("east")
+    if turtle.detect() then return false end
+    Movement.faceDir("south")
+    if turtle.detect() then Movement.faceDir("east") return false end
+    Movement.faceDir("west")
+    if turtle.detect() then Movement.faceDir("east") return false end
+    Movement.faceDir("north")
+    if turtle.detect() then Movement.faceDir("east") return false end
+    Movement.faceDir("east")
+    return true
 end
 
 -- ============================================================
@@ -312,6 +353,17 @@ function Quarry.mineLayer(session)
         session.currentLayer, startRow, startCol
     ))
 
+    -- Opción E: detección rápida de cueva al inicio de la capa.
+    -- Si no hay ningún bloque en ninguna dirección, es una cueva grande → saltar ya.
+    -- Solo se evalúa cuando empezamos desde el principio (no al reanudar a mitad).
+    if startRow == 0 and startCol == 0 and isCaveEntry() then
+        Logger.info(string.format(
+            "Cueva detectada al inicio de capa %d — saltando directamente",
+            session.currentLayer
+        ))
+        return "EMPTY"
+    end
+
     -- Helper: sincronizar x,y,z,dir del objeto session con la posición real del tracker.
     -- CRÍTICO: session.x/y/z/dir NO se actualizan automáticamente al moverse.
     -- Sin esto, State.save(session) / State.checkpoint(session) guardan 0,0,0 y al
@@ -400,10 +452,14 @@ function Quarry.mineLayer(session)
                 end
             end
 
-            -- Techo
+            -- Techo + suelo (Opción D: minería 3 bloques de alto)
             local hadCeiling = turtle.detectUp()
             safeDigUp()
             if hadCeiling then digsThisRow = digsThisRow + 1 end
+
+            local hadFloor = turtle.detectDown()
+            safeDigFloor()
+            if hadFloor then digsThisRow = digsThisRow + 1 end
 
             -- Avanzar (ignorar irrompibles)
             local kind = classifyBlock(turtle.inspect)
@@ -424,10 +480,14 @@ function Quarry.mineLayer(session)
             col = col + colStep
         end
 
-        -- Techo en la posición final de la fila
+        -- Techo + suelo en la posición final de la fila
         local hadLastCeiling = turtle.detectUp()
         safeDigUp()
         if hadLastCeiling then digsThisRow = digsThisRow + 1 end
+
+        local hadLastFloor = turtle.detectDown()
+        safeDigFloor()
+        if hadLastFloor then digsThisRow = digsThisRow + 1 end
 
         -- Detectar capa vacía: contar filas sin bloques rompibles
         if digsThisRow == 0 then
@@ -471,6 +531,7 @@ function Quarry.mineLayer(session)
                 return "COMPLETE"
             end
             safeDigUp()
+            safeDigFloor()
             if not safeDigForward(session) then
                 Logger.warn("No se pudo avanzar a la fila " .. (row+1))
             end

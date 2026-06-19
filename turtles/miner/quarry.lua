@@ -11,40 +11,34 @@
 --
 -- REGLA: todo movimiento pasa por movement.lua.
 
-local Config    = require("config.config")
-local Logger    = require("core.logger")
-local Movement  = require("core.movement")
-local Fuel      = require("core.fuel")
-local Inventory = require("core.inventory")
-local State     = require("turtles.miner.state")
+local Config     = require("config.config")
+local Constants  = require("config.constants")
+local Logger     = require("core.logger")
+local Movement   = require("core.movement")
+local Fuel       = require("core.fuel")
+local Inventory  = require("core.inventory")
+local State      = require("turtles.miner.state")
 
 local Quarry = {}
 
+-- Aliases locales de Constants para menor verbosidad en este módulo.
+local isUnbreakable = Constants.isUnbreakable
+local isTurtleBlock = Constants.isTurtleBlock
+local isLava        = Constants.isLava
+
 -- ============================================================
--- Bloques irrompibles conocidos
+-- Captura de posición para guardado de estado
 -- ============================================================
-
-local UNBREAKABLE = {
-    ["minecraft:bedrock"]                    = true,
-    ["minecraft:barrier"]                    = true,
-    ["minecraft:command_block"]              = true,
-    ["minecraft:chain_command_block"]        = true,
-    ["minecraft:repeating_command_block"]    = true,
-    ["minecraft:end_portal_frame"]           = true,
-    ["minecraft:reinforced_deepslate"]       = true,
-}
-
-local function isUnbreakable(name)
-    return name ~= nil and UNBREAKABLE[name] == true
-end
-
-local function isLava(name)
-    return name ~= nil and (name == "minecraft:lava" or name:find("lava") ~= nil)
-end
-
--- Detecta si el bloque es otra turtle (CC:Tweaked: computercraft:turtle_*)
-local function isTurtleBlock(name)
-    return name ~= nil and name:find("turtle") ~= nil
+-- Actualiza x/y/z/dir del objeto de sesión desde el tracker de movimiento.
+-- Llamar SIEMPRE justo antes de State.save o State.checkpoint para que las
+-- coordenadas persisitidas correspondan a la posición real de la turtle.
+local function capturePos(sess)
+    local p    = Movement.getPos()
+    sess.x     = p.x
+    sess.y     = p.y
+    sess.z     = p.z
+    sess.dir   = Movement.getDir()
+    return sess
 end
 
 -- ============================================================
@@ -364,19 +358,7 @@ function Quarry.mineLayer(session)
         return "EMPTY"
     end
 
-    -- Helper: sincronizar x,y,z,dir del objeto session con la posición real del tracker.
-    -- CRÍTICO: session.x/y/z/dir NO se actualizan automáticamente al moverse.
-    -- Sin esto, State.save(session) / State.checkpoint(session) guardan 0,0,0 y al
-    -- reanudar Movement.setState restaura el origen en vez de la posición real.
-    local function syncPos()
-        local p = Movement.getPos()
-        session.x   = p.x
-        session.y   = p.y
-        session.z   = p.z
-        session.dir = Movement.getDir()
-    end
-
-    -- Helper: guardar workPosition y retornar al origen
+    -- Helper: guardar workPosition y retornar al origen de la columna del pozo.
     local function saveAndReturn(reason)
         local p = Movement.getPos()
         session.workPosition = {
@@ -389,8 +371,7 @@ function Quarry.mineLayer(session)
             currentColumn = session.currentColumn,
         }
         session.returningReason = reason
-        syncPos()
-        State.save(session)
+        State.save(capturePos(session))  -- capturePos actualiza x/y/z/dir antes de escribir
 
         returnToOriginColumn()
         return reason
@@ -404,9 +385,10 @@ function Quarry.mineLayer(session)
     end
 
     -- Filas vacías consecutivas: si alcanza EMPTY_ROW_THRESHOLD, la capa
-    -- se considera vacía (cueva o ya excavada) y se salta al nivel siguiente.
-    -- Con 1: basta una fila sin bloques para saltar inmediatamente.
-    local EMPTY_ROW_THRESHOLD = 1
+    -- se considera vacía (cueva grande o zona ya excavada) y se salta.
+    -- Con 3: tolera hasta 2 filas vacías seguidas antes de saltarse la capa,
+    -- evitando que una cueva angosta haga perder los ores de las filas siguientes.
+    local EMPTY_ROW_THRESHOLD = 3
     local consecutiveEmptyRows = 0
 
     for row = startRow, W - 1 do
@@ -475,8 +457,7 @@ function Quarry.mineLayer(session)
             end
             if hadFront then digsThisRow = digsThisRow + 1 end
 
-            syncPos()
-            State.checkpoint(session)
+            State.checkpoint(capturePos(session))
             col = col + colStep
         end
 
@@ -536,8 +517,7 @@ function Quarry.mineLayer(session)
                 Logger.warn("No se pudo avanzar a la fila " .. (row+1))
             end
 
-            syncPos()
-            State.checkpoint(session)
+            State.checkpoint(capturePos(session))
         end
     end
 

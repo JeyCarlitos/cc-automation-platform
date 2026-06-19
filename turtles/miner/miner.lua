@@ -25,14 +25,15 @@
 --     ↓ BEDROCK
 --   RETURNING_TO_BASE → UNLOADING → COMPLETE
 
-local Config    = require("config.config")
-local Logger    = require("core.logger")
-local Movement  = require("core.movement")
-local Fuel      = require("core.fuel")
-local Inventory = require("core.inventory")
-local State     = require("turtles.miner.state")
-local Quarry    = require("turtles.miner.quarry")
-local Network   = require("core.network")
+local Config     = require("config.config")
+local Constants  = require("config.constants")
+local Logger     = require("core.logger")
+local Movement   = require("core.movement")
+local Fuel       = require("core.fuel")
+local Inventory  = require("core.inventory")
+local State      = require("turtles.miner.state")
+local Quarry     = require("turtles.miner.quarry")
+local Network    = require("core.network")
 
 -- ============================================================
 -- Navegación segura con anti-deadlock.
@@ -179,7 +180,7 @@ local function returnToBase()
         sleep(0)
         local hasBlock, data = turtle.inspectUp()
         if hasBlock then
-            if data and isUnbreakableLocal(data.name) then
+            if data and Constants.isUnbreakable(data.name) then
                 Logger.error("Irrompible en techo del pozo en y=" .. Movement.getPos().y)
                 stuckCount = stuckCount + 1
                 if stuckCount > 6 then break end
@@ -268,14 +269,32 @@ local function notifyController(msg)
     end
 end
 
-local UNBREAKABLE_LOCAL = {
-    ["minecraft:bedrock"] = true, ["minecraft:barrier"] = true,
-    ["minecraft:command_block"] = true, ["minecraft:chain_command_block"] = true,
-    ["minecraft:repeating_command_block"] = true,
-    ["minecraft:end_portal_frame"] = true, ["minecraft:reinforced_deepslate"] = true,
-}
-isUnbreakableLocal = function(name)
-    return name ~= nil and UNBREAKABLE_LOCAL[name] == true
+-- Constants.isUnbreakable se usa directamente desde config/constants.lua
+
+-- ============================================================
+-- Heartbeat periódico al controlador
+-- Envía STATUS cada 60 s para que el commander sepa que la turtle
+-- sigue viva durante capas largas donde no habría otra comunicación.
+-- Solo envía si hay un controlador conocido (session.controllerID != nil).
+-- ============================================================
+
+local function heartbeatLoop()
+    while true do
+        sleep(60)
+        if session.controllerID then
+            local p     = Movement.getPos()
+            local label = os.getComputerLabel() or ("ID:" .. os.getComputerID())
+            Network.send(session.controllerID, string.format(
+                "[%s] HEARTBEAT phase=%s zone=%s layer=%d fuel=%d x=%d y=%d z=%d",
+                label, session.phase, tostring(session.zone),
+                session.currentLayer, Fuel.getLevel(),
+                p.x, p.y, p.z
+            ))
+            Logger.debug(string.format(
+                "Heartbeat enviado al controlador %d", session.controllerID
+            ))
+        end
+    end
 end
 
 -- ============================================================
@@ -740,24 +759,54 @@ local function minerMain()
                 unloadAndRefuel()
                 phase = "COMPLETE"
             else
-                local result = Quarry.descendToLayer(session, nextLayer)
-
-                if result == "BEDROCK" then
-                    Logger.info("Bedrock encontrado: quarry terminado")
-                    session.returningReason = "LAYER_COMPLETE"
-                    session.phase = "RETURNING_TO_BASE"
+                -- ── Pre-check de fuel antes de descender ──────────────────
+                -- Verifica que hay fuel suficiente para bajar LAYER_HEIGHT bloques
+                -- más el costo de retorno desde la nueva profundidad.
+                -- Fuel.hasSufficient ya incluye estimateReturnCost() (Manhattan),
+                -- así que solo pasamos el costo incremental del descenso + mínimo
+                -- para al menos una fila antes de volver a evaluar mid-layer.
+                local preDescendFuel = Config.LAYER_HEIGHT + Config.QUARRY_LENGTH + 10
+                if not Fuel.ensureFuel(preDescendFuel) then
+                    Logger.warn(string.format(
+                        "Fuel insuficiente antes de descender a capa %d — regresando a base",
+                        nextLayer
+                    ))
+                    session.returningReason = "FUEL_LOW"
                     State.save(snapshot("RETURNING_TO_BASE"))
                     returnToBase()
+                    session.phase = "UNLOADING"
                     unloadAndRefuel()
-                    phase = "COMPLETE"
+
+                    local fullLayerFuel = Config.QUARRY_WIDTH * Config.QUARRY_LENGTH
+                                       + Config.QUARRY_WIDTH + 20
+                    if not Fuel.ensureFuel(fullLayerFuel) then
+                        Logger.error("Sin fuel suficiente tras reabastecimiento. Abortando.")
+                        phase = "ERROR"
+                    else
+                        Logger.info("Fuel OK tras reabastecimiento. Reintentando descenso.")
+                        session.phase = "DESCENDING_NEXT_LAYER"
+                        phase = "DESCENDING_NEXT_LAYER"
+                    end
                 else
-                    session.currentLayer    = nextLayer
-                    session.currentRow      = 0
-                    session.currentColumn   = 0
-                    session.workPosition    = nil
-                    session.phase = "MINING_LAYER"
-                    phase = "MINING_LAYER"
-                    Logger.info(string.format("En capa %d", nextLayer))
+                    local result = Quarry.descendToLayer(session, nextLayer)
+
+                    if result == "BEDROCK" then
+                        Logger.info("Bedrock encontrado: quarry terminado")
+                        session.returningReason = "LAYER_COMPLETE"
+                        session.phase = "RETURNING_TO_BASE"
+                        State.save(snapshot("RETURNING_TO_BASE"))
+                        returnToBase()
+                        unloadAndRefuel()
+                        phase = "COMPLETE"
+                    else
+                        session.currentLayer    = nextLayer
+                        session.currentRow      = 0
+                        session.currentColumn   = 0
+                        session.workPosition    = nil
+                        session.phase = "MINING_LAYER"
+                        phase = "MINING_LAYER"
+                        Logger.info(string.format("En capa %d", nextLayer))
+                    end
                 end
             end
 
@@ -797,7 +846,7 @@ end
 -- ============================================================
 
 function Miner.run()
-    parallel.waitForAny(commandListener, minerMain)
+    parallel.waitForAny(commandListener, minerMain, heartbeatLoop)
 end
 
 return Miner

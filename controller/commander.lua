@@ -200,6 +200,50 @@ local function listTurtles()
 end
 
 -- ============================================================
+-- Comando FUEL — muestra solo combustible de cada turtle
+-- ============================================================
+
+local function showFuel(targetId)
+    send(targetId, "STATUS")
+
+    local expectedIds = targetId and {targetId} or knownIds()
+    local replies = collectReplies(TIMEOUT, #expectedIds > 0 and expectedIds or nil)
+
+    if #replies == 0 then
+        clrln(colors.red, "  Sin respuesta (timeout).")
+        print("")
+        return
+    end
+
+    if COMPACT then
+        clrln(colors.yellow, "Combustible:")
+    else
+        clrln(colors.yellow, "  Combustible actual:")
+    end
+
+    for _, r in ipairs(replies) do
+        local lbl  = r.msg:match("^%[(.-)%]") or displayName(r.id)
+        local fuel = tonumber(r.msg:match("fuel=(%d+)")) or 0
+        registerTurtle(r.id, lbl, r.msg)
+
+        -- Verde > 2000 | Amarillo > 500 | Rojo ≤ 500
+        local col
+        if fuel > 2000 then col = colors.lime
+        elseif fuel > 500 then col = colors.yellow
+        else col = colors.red end
+
+        if COMPACT then
+            clr(colors.white, "[" .. lbl .. "] ")
+            clrln(col, tostring(fuel))
+        else
+            clr(colors.lime, string.format("  [%-14s] ", lbl))
+            clrln(col, string.format("fuel: %d", fuel))
+        end
+    end
+    print("")
+end
+
+-- ============================================================
 -- Header (adaptativo: compacto para pocket computer, 26 cols)
 -- ============================================================
 
@@ -217,6 +261,7 @@ local function printHeader()
         clr(colors.lime, "init "); clrln(colors.white, "— zonas + descenso")
         clr(colors.lime, "zone <id> <N> "); clrln(colors.white, "— reemplazar")
         clr(colors.lime, "s "); clrln(colors.white, "[id] — estado")
+        clr(colors.lime, "f "); clrln(colors.white, "[id] — combustible")
         clr(colors.lime, "r "); clrln(colors.white, "[id] — volver a base")
         clr(colors.lime, "d "); clrln(colors.white, "[id] — descargar")
         clr(colors.lime, "u "); clrln(colors.white, "[id] — actualizar")
@@ -233,6 +278,7 @@ local function printHeader()
         clr(colors.lime,      "   init          "); clrln(colors.white, "— arranque: asignar zonas y bajar")
         clr(colors.lime,      "   zone <id> <N> "); clrln(colors.white, "— reemplazar turtle destruida")
         print("   s  [id]       — estado actual")
+        clr(colors.lime,      "   f  [id]       "); clrln(colors.white, "— combustible (verde/amarillo/rojo)")
         print("   r  [id]       — regresar a base y parar")
         print("   d  [id]       — descargar y seguir minando")
         print("   u  [id]       — actualizar código y reiniciar")
@@ -424,6 +470,8 @@ end
 local CMD_MAP = {
     s       = "STATUS",
     status  = "STATUS",
+    f       = "FUEL",     -- ver combustible de todas/una turtle
+    fuel    = "FUEL",
     r       = "RETURN",
     ["return"] = "RETURN",
     d       = "DEPOSIT",
@@ -492,12 +540,13 @@ while true do
     elseif cmd == "QUIT"    then break
     elseif cmd == "LIST"    then listTurtles()
     elseif cmd == "INIT"    then runInit()
+    elseif cmd == "FUEL"    then showFuel(targetId)
     elseif cmd == "EMPTY"   then -- ignorar
     elseif cmd == "INVALID" then -- ya mostró error
     elseif cmd ~= nil       then runCmd(cmd, targetId)
     else
         clrln(colors.red, "  Comando no reconocido.")
-        print("  Usa: init, zone, s, r, d, u, rb, list, q")
+        print("  Usa: init, zone, s, f, r, d, u, rb, list, q")
         print("")
     end
 end

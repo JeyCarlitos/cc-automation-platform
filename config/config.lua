@@ -110,4 +110,36 @@ Config.STATE_FILE          = "data/state/miner.json"
 Config.LOG_LEVEL = "INFO"
 Config.LOG_FILE  = "data/logs/miner.log"
 
+-- ============================================================
+-- FARMER (Farming Turtle)
+-- ============================================================
+
+-- Radio de escaneo en bloques desde HOME.
+-- Con 16, cubre hasta 16 bloques en cada dirección (cuadrícula 33×33).
+Config.FARM_SCAN_RADIUS = 16
+
+-- Segundos de espera entre ciclos completos de farmeo.
+Config.FARM_LOOP_DELAY = 120
+
+-- Si true, la turtle aplica bonemeal a cultivos inmaduros.
+Config.USE_BONEMEAL = true
+
+-- Cantidad objetivo de bonemeal a tener en inventario al reabastecerse.
+Config.BONEMEAL_TARGET_AMOUNT = 32
+
+-- Intentos máximos de bonemeal por plot antes de pasar al siguiente.
+Config.BONEMEAL_MAX_ATTEMPTS = 3
+
+-- Si true y no hay mapa al ejecutar "farmer run", escanea automáticamente.
+Config.AUTO_SCAN_IF_NO_MAP = true
+
+-- Guardar estado del farmer cada N plots visitados.
+Config.FARMER_STATE_SAVE_INTERVAL = 5
+
+-- Archivo de estado del farmer.
+Config.FARMER_STATE_FILE = "data/state/farmer.json"
+
+-- Archivo de log del farmer (se activa al iniciar farmer.lua).
+Config.FARMER_LOG_FILE = "data/logs/farmer.log"
+
 return Config

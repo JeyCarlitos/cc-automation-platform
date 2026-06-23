@@ -21,6 +21,7 @@ local FILES = {
     "config/constants.lua",
     "core/logger.lua",
     "core/movement.lua",
+    "core/nav.lua",
     "core/fuel.lua",
     "core/inventory.lua",
     "core/network.lua",

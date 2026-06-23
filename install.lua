@@ -18,6 +18,7 @@ local FILES = {
     "startup.lua",
     "install.lua",       -- se auto-actualiza desde GitHub
     "config/config.lua",
+    "config/constants.lua",
     "core/logger.lua",
     "core/movement.lua",
     "core/fuel.lua",
@@ -26,6 +27,12 @@ local FILES = {
     "turtles/miner/state.lua",
     "turtles/miner/quarry.lua",
     "turtles/miner/miner.lua",
+    "turtles/farmer/crop.lua",
+    "turtles/farmer/farmMap.lua",
+    "turtles/farmer/farmRoute.lua",
+    "turtles/farmer/farmScanner.lua",
+    "turtles/farmer/farmerState.lua",
+    "turtles/farmer/farmer.lua",
     "controller/commander.lua",
 }
 
@@ -35,9 +42,12 @@ local DIRS = {
     "controller",
     "turtles",
     "turtles/miner",
+    "turtles/farmer",
     "data",
     "data/logs",
     "data/state",
+    "data/jobs",
+    "data/metrics",
 }
 
 -- ============================================================
@@ -181,6 +191,14 @@ local function main()
         if fs.exists("commander") then fs.delete("commander") end
         fs.copy("controller/commander.lua", "commander")
         ok("commander  (shortcut actualizado)")
+    end
+
+    -- Crear/actualizar el shortcut "farmer" en la raíz.
+    -- Permite ejecutar 'farmer scan', 'farmer run', etc. directamente.
+    if fs.exists("turtles/farmer/farmer.lua") then
+        if fs.exists("farmer") then fs.delete("farmer") end
+        fs.copy("turtles/farmer/farmer.lua", "farmer")
+        ok("farmer  (shortcut actualizado)")
     end
 
     print("")

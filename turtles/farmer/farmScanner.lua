@@ -1,115 +1,181 @@
 -- turtles/farmer/farmScanner.lua
 -- Descubre automáticamente el área cultivable de la granja.
 --
--- *** ALTURA DE NAVEGACIÓN ***
--- El scanner navega a y=1 (NUNCA a y=0) para no pisar el farmland.
+-- *** MODELO DE ALTURAS ***
 --
---   y=-1 (rel) → farmland (bloque de tierra arada)
---   y= 0 (rel) → nivel del cultivo (aquí crece el trigo/zanahoria/etc.)
---   y= 1 (rel) → altura de navegación segura (turtle está ENCIMA del cultivo)
+--   y=-1  farmland (tierra arada)
+--   y= 0  nivel del cultivo (trigo, zanahoria, etc.)
+--   y= 1  altura de navegación del scanner (NUNCA bajamos a y=0 sobre farmland)
 --
--- Desde y=1, inspectDown() ve el bloque en y=0:
---   - Cultivo conocido  → farmland confirmado debajo (y=-1) → marcar como plot
---   - Aire              → farmland vacío posible → intentar plantar semilla
---                         Si placeDown() funciona → farmland confirmado + semilla plantada
---                         Si falla               → no es farmland, ignorar
---   - Otro bloque       → no es área de cultivo, ignorar
+-- Desde y=1 el scanner usa tres métodos para detectar farmland:
 --
--- PRERREQUISITO: la turtle debe estar en HOME (0,0) al llamar scan().
--- Al terminar regresa a HOME a y=0 y queda mirando north.
+--   CASO 1 — Cultivo en y=0
+--     inspectDown() ve un cultivo conocido → farmland confirmado debajo.
+--     No hacemos nada, respetamos el cultivo.
+--
+--   CASO 2 — Aire en y=0, farmland intacto
+--     inspectDown() ve aire → puede ser farmland vacío (sin cultivo aún).
+--     Probamos placeDown() con una semilla.
+--     Si planta: farmland confirmado + semilla plantada (doble beneficio).
+--     Si no planta: piso incorrecto, ignorar.
+--
+--   CASO 3 — Aire en y=0, farmland dañado (es dirt ahora)
+--     placeDown() falló pero el motivo puede ser que y=-1 es dirt.
+--     AQUÍ ES SEGURO BAJAR: y=0 es aire, aterrizamos sobre dirt (no farmland),
+--     no hay riesgo de pisar farmland.
+--     Bajamos a y=0 → usamos azada sobre y=-1 (dirt → farmland) → subimos →
+--     plantamos semilla → marcamos como plot.
+--
+-- Al terminar regresa a HOME (0,0) a y=0 mirando north.
 
-local Config    = require("config.config")
-local Logger    = require("core.logger")
-local Nav       = require("core.nav")
-local Fuel      = require("core.fuel")
-local Movement  = require("core.movement")
-local Crop      = require("turtles.farmer.crop")
+local Config   = require("config.config")
+local Logger   = require("core.logger")
+local Nav      = require("core.nav")
+local Fuel     = require("core.fuel")
+local Movement = require("core.movement")
+local Crop     = require("turtles.farmer.crop")
 
 local FarmScanner = {}
 
 -- ============================================================
--- Detección de farmland desde y=1
+-- Helpers de inventario
 -- ============================================================
 
--- Busca cualquier semilla en el inventario.
--- Retorna (slot, nombre) o (nil, nil) si no hay ninguna.
+-- Retorna el slot de cualquier semilla disponible, o nil.
 local function findAnySeed()
     for name, _ in pairs(Crop.allSeeds()) do
         for slot = 1, 16 do
             local d = turtle.getItemDetail(slot)
-            if d and d.name == name then
-                return slot, name
-            end
+            if d and d.name == name then return slot end
         end
     end
-    return nil, nil
+    return nil
 end
 
--- Detecta si la celda actual contiene farmland. Se llama desde y=1.
--- inspectDown() ve y=0 (nivel del cultivo).
---
--- Lógica:
---   1. Hay cultivo conocido abajo → farmland confirmado (respeta el cultivo)
---   2. Hay aire abajo             → probar placeDown() con semilla
---      Si planta OK → farmland confirmado; semilla queda plantada (¡útil!)
---      Si falla     → no hay farmland en y=-1
---   3. Otro bloque                → no es área de cultivo
-local function detectFarmlandFromAbove()
-    local hasBlock, data = turtle.inspectDown()
-
-    -- Caso 1: cultivo conocido → farmland confirmado
-    if hasBlock and Crop.isCrop(data.name) then
-        return true
+-- Retorna el slot de una azada (mejor material primero), o nil.
+local HOE_NAMES = {
+    "minecraft:netherite_hoe", "minecraft:diamond_hoe",
+    "minecraft:iron_hoe",      "minecraft:golden_hoe",
+    "minecraft:stone_hoe",     "minecraft:wooden_hoe",
+}
+local function findHoe()
+    for _, hoeName in ipairs(HOE_NAMES) do
+        for slot = 1, 16 do
+            local d = turtle.getItemDetail(slot)
+            if d and d.name == hoeName then return slot end
+        end
     end
+    return nil
+end
 
-    -- Caso 3: bloque no-cultivo → no es farmland
-    if hasBlock then
-        return false
-    end
-
-    -- Caso 2: aire → verificar con semilla
+-- Intenta plantar una semilla hacia abajo. Retorna true si logró plantar.
+local function tryPlantSeed()
     local seedSlot = findAnySeed()
-    if not seedSlot then
-        Logger.debug("[Scanner] Sin semillas para verificar celda vacía")
-        return false
-    end
-
+    if not seedSlot then return false end
     turtle.select(seedSlot)
-    local planted = turtle.placeDown()
+    local ok = turtle.placeDown()
     turtle.select(1)
-
-    if planted then
-        Logger.debug(string.format(
-            "[Scanner] Farmland vacío confirmado en (%d,%d) — semilla plantada",
-            Movement.getPos().x, Movement.getPos().z
-        ))
-        return true
-    end
-
-    return false
+    return ok
 end
 
 -- ============================================================
--- Subir / bajar (con reintentos y dig)
+-- Subir / bajar con reintentos
 -- ============================================================
 
 local function goUp()
     for _ = 1, 5 do
         if Movement.up() then return true end
-        turtle.digUp()
-        sleep(0.2)
+        turtle.digUp(); sleep(0.2)
     end
-    Logger.error("[Scanner] No se pudo subir a y=1")
     return false
 end
 
 local function goDown()
     for _ = 1, 5 do
         if Movement.down() then return true end
-        turtle.digDown()
-        sleep(0.2)
+        turtle.digDown(); sleep(0.2)
     end
-    Logger.error("[Scanner] No se pudo bajar a y=0")
+    return false
+end
+
+-- ============================================================
+-- Detección de farmland desde y=1
+-- ============================================================
+
+-- Tierra que se puede volver a arar (fue farmland, ahora es dirt/grass).
+local TILLABLE = {
+    ["minecraft:dirt"]        = true,
+    ["minecraft:grass_block"] = true,
+    ["minecraft:coarse_dirt"] = true,
+    ["minecraft:dirt_path"]   = true,
+}
+
+-- Evalúa si la celda actual (x,z) tiene farmland y si es posible repararla.
+-- La turtle DEBE estar a y=1 al llamar esta función.
+-- Puede modifica el estado: puede plantar semillas, re-arar, subir/bajar.
+-- Al retornar la turtle siempre queda a y=1 en la misma posición (x,z).
+-- Retorna true si la celda es (o fue) farmland y está lista para cultivar.
+local function detectAndRepair(hoeSlot)
+    local px, pz = Movement.getPos().x, Movement.getPos().z
+
+    -- ── CASO 1: cultivo en y=0 ────────────────────────────────
+    local hasBlock, data = turtle.inspectDown()
+    if hasBlock and Crop.isCrop(data.name) then
+        return true  -- farmland confirmado, cultivo sano
+    end
+
+    -- bloque no-cultivo sólido en y=0 → no es área de cultivo
+    if hasBlock then
+        return false
+    end
+
+    -- ── CASO 2: aire en y=0, intentar plantar ─────────────────
+    if tryPlantSeed() then
+        Logger.debug(string.format("[Scanner] Farmland vacío confirmado (%d,%d)", px, pz))
+        return true
+    end
+
+    -- ── CASO 3: planta falló → posible farmland dañado ────────
+    -- Bajar a y=0 es seguro: y=0 es aire (acabamos de confirmarlo),
+    -- así que aterrizamos sobre lo que sea en y=-1.
+    -- Si es dirt → arar → plantar → OK.
+    -- Si es otra cosa (piedra, bedrock…) → subir y descartar.
+    if not hoeSlot then
+        Logger.debug(string.format(
+            "[Scanner] (%d,%d) sin cultivo/semilla y sin azada — ignorando", px, pz
+        ))
+        return false
+    end
+
+    if not goDown() then
+        Logger.warn(string.format("[Scanner] No pude bajar en (%d,%d)", px, pz))
+        return false
+    end
+
+    -- Ahora en y=0. Ver qué hay en y=-1.
+    local hasDirt, dirtData = turtle.inspectDown()
+    local canTill = hasDirt and TILLABLE[dirtData.name]
+
+    if canTill then
+        turtle.select(hoeSlot)
+        local tilled = turtle.placeDown()
+        turtle.select(1)
+
+        goUp()  -- volver a y=1
+
+        if tilled then
+            Logger.info(string.format("[Scanner] Tierra re-arada en (%d,%d)", px, pz))
+            tryPlantSeed()  -- plantar encima del nuevo farmland
+            return true
+        end
+    else
+        goUp()
+        Logger.debug(string.format(
+            "[Scanner] (%d,%d): %s — no es farmland",
+            px, pz, hasDirt and dirtData.name or "vacío"
+        ))
+    end
+
     return false
 end
 
@@ -118,14 +184,23 @@ end
 -- ============================================================
 
 -- Recorre una cuadrícula (2*radius+1)² centrada en HOME buscando farmland.
--- Navega a y=1 para nunca pisar el farmland.
+-- Navega a y=1 para no pisar el farmland.
+-- Si hay azada en inventario, repara farmland dañado automáticamente.
 -- Retorna array de { x=int, z=int }.
 function FarmScanner.scan(radius)
     radius = radius or Config.FARM_SCAN_RADIUS or 16
 
-    -- Subir a y=1 ANTES de moverse sobre el farmland
+    -- Localizar azada UNA VEZ al inicio (no buscar en cada celda)
+    local hoeSlot = findHoe()
+    if hoeSlot then
+        Logger.info("[Scanner] Azada encontrada — se reparará farmland dañado")
+    else
+        Logger.info("[Scanner] Sin azada — solo se detectará farmland intacto")
+    end
+
+    -- Subir a y=1 ANTES de navegar sobre el área de cultivo
     if Movement.getPos().y < 1 then
-        Logger.info("[Scanner] Subiendo a y=1 para no pisar el farmland...")
+        Logger.info("[Scanner] Subiendo a y=1...")
         if not goUp() then
             Logger.error("[Scanner] No se pudo subir — abortando")
             return {}
@@ -137,7 +212,7 @@ function FarmScanner.scan(radius)
     local rowIdx  = 0
 
     Logger.info(string.format(
-        "[Scanner] Inicio a y=1. Radio: %d (~%d celdas)",
+        "[Scanner] Inicio. Radio: %d (%d celdas)",
         radius, (2*radius+1)^2
     ))
 
@@ -153,38 +228,35 @@ function FarmScanner.scan(radius)
         rowIdx = rowIdx + 1
 
         for _, x in ipairs(xList) do
-            -- Fuel check: reserva para volver a HOME
+            -- Fuel check
             local p = Movement.getPos()
             local returnDist = math.abs(p.x) + math.abs(p.z) + 4
             if not Fuel.hasSufficient(returnDist) then
                 Logger.warn("[Scanner] Fuel bajo — abortando")
-                Nav.navXZ(0, 0)
-                goDown()
+                Nav.navXZ(0, 0); goDown()
                 Movement.faceDir("north")
-                Logger.info(string.format(
-                    "[Scanner] Abortado por fuel. %d plots, %d saltadas.",
-                    #plots, skipped
-                ))
                 return plots
             end
 
-            -- Navegar a la celda sin pisar farmland (permanecemos en y=1)
+            -- Navegar a la celda (la turtle permanece en y=1)
             local reached = Nav.navXZ(x, z)
             if not reached then
                 skipped = skipped + 1
-                Logger.warn(string.format("[Scanner] Celda (%d,%d) inaccesible, saltando", x, z))
+                Logger.warn(string.format("[Scanner] (%d,%d) inaccesible", x, z))
             else
                 sleep(0)
-                if detectFarmlandFromAbove() then
+                -- Re-buscar azada periódicamente (puede haber sido consumida/dañada)
+                if not hoeSlot then hoeSlot = findHoe() end
+
+                if detectAndRepair(hoeSlot) then
                     plots[#plots+1] = { x = x, z = z }
-                    Logger.debug(string.format("[Scanner] Plot en x=%d z=%d", x, z))
                 end
             end
         end
     end
 
     Logger.info(string.format(
-        "[Scanner] Terminado. %d plots, %d saltadas.",
+        "[Scanner] Terminado. %d plots, %d inaccesibles.",
         #plots, skipped
     ))
 

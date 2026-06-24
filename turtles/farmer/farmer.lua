@@ -220,9 +220,9 @@ local function plantSeed(cropName)
         return false
     end
     if not selectItem(seedName) then return false end
-    local ok = turtle.placeDown()
+    local planted = turtle.placeDown()
     turtle.select(1)
-    return ok
+    return planted
 end
 
 local function applyBonemeal()
@@ -240,30 +240,105 @@ local function applyBonemeal()
     return false
 end
 
-local function workPlot(px, pz)
-    local hasCrop, data = turtle.inspectDown()
-    if not hasCrop then
-        plantSeed(nil)
-        return
-    end
-    if not Crop.isCrop(data.name) then
-        Logger.debug(string.format("[Farmer] Plot (%d,%d): %s", px, pz, data.name))
-        return
-    end
-    if Crop.isMature(data) then
-        local cropName = data.name
-        turtle.digDown()
-        plantSeed(cropName)
-        return
-    end
-    if Config.USE_BONEMEAL and countItem("minecraft:bone_meal") > 0 then
-        local matured = applyBonemeal()
-        if matured then
-            local _, mData = turtle.inspectDown()
-            turtle.digDown()
-            plantSeed(mData and mData.name)
+-- Busca una azada en el inventario. Retorna el slot o nil.
+-- Preferencia: mejor material primero para no gastar la peor.
+local HOE_NAMES = {
+    "minecraft:netherite_hoe", "minecraft:diamond_hoe",
+    "minecraft:iron_hoe",      "minecraft:golden_hoe",
+    "minecraft:stone_hoe",     "minecraft:wooden_hoe",
+}
+local function findHoe()
+    for _, hoeName in ipairs(HOE_NAMES) do
+        for slot = 1, 16 do
+            local d = turtle.getItemDetail(slot)
+            if d and d.name == hoeName then return slot end
         end
     end
+    return nil
+end
+
+-- Intenta re-arar la celda actual cuando plantSeed() falló.
+-- El farmland se dañó y ahora es dirt. Secuencia:
+--   1. Bajar a y=0 (encima del dirt — no hay farmland que pisar).
+--   2. Usar azada con placeDown() para convertir dirt → farmland.
+--   3. Subir a y=1.
+--   4. Plantar semilla.
+local function reTillAndPlant(px, pz, cropName)
+    local hoeSlot = findHoe()
+    if not hoeSlot then
+        Logger.warn(string.format(
+            "[Farmer] Farmland dañado en (%d,%d) — sin azada para reparar", px, pz
+        ))
+        return
+    end
+
+    Logger.info(string.format("[Farmer] Farmland dañado en (%d,%d) — re-arando", px, pz))
+
+    -- Bajar a y=0 (encima del dirt/suelo dañado)
+    if not Movement.down() then
+        turtle.digDown(); sleep(0.2)
+        if not Movement.down() then
+            Logger.warn("[Farmer] No se pudo bajar para re-arar")
+            return
+        end
+    end
+
+    -- Usar azada sobre el bloque en y=-1 (dirt)
+    turtle.select(hoeSlot)
+    local tilled = turtle.placeDown()
+    turtle.select(1)
+
+    -- Subir de vuelta a y=1
+    if not Movement.up() then
+        turtle.digUp(); sleep(0.2)
+        Movement.up()
+    end
+
+    if tilled then
+        Logger.info(string.format("[Farmer] Tierra re-arada en (%d,%d) — plantando", px, pz))
+        plantSeed(cropName)
+    else
+        Logger.warn(string.format("[Farmer] No se pudo arar (%d,%d)", px, pz))
+    end
+end
+
+local function workPlot(px, pz)
+    local hasCrop, data = turtle.inspectDown()
+
+    -- Sin bloque en el nivel del cultivo (y=0) → farmland desnudo o dañado
+    if not hasCrop then
+        -- Intentar plantar directamente
+        if not plantSeed(nil) then
+            -- placeDown() falló → farmland posiblemente dañado (es dirt ahora)
+            reTillAndPlant(px, pz, nil)
+        end
+        return
+    end
+
+    -- Cultivo conocido → manejar ciclo de crecimiento
+    if Crop.isCrop(data.name) then
+        if Crop.isMature(data) then
+            local cropName = data.name
+            turtle.digDown()
+            if not plantSeed(cropName) then
+                reTillAndPlant(px, pz, cropName)
+            end
+        elseif Config.USE_BONEMEAL and countItem("minecraft:bone_meal") > 0 then
+            local matured = applyBonemeal()
+            if matured then
+                local _, mData = turtle.inspectDown()
+                turtle.digDown()
+                local cn = mData and mData.name
+                if not plantSeed(cn) then
+                    reTillAndPlant(px, pz, cn)
+                end
+            end
+        end
+        return
+    end
+
+    -- Bloque desconocido en y=0 (piedra, hierba, etc.) — ignorar
+    Logger.debug(string.format("[Farmer] Plot (%d,%d): bloque inesperado %s", px, pz, data.name))
 end
 
 -- ============================================================

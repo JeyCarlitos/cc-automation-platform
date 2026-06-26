@@ -121,18 +121,9 @@ local function isItemFuel(slot)
     return result
 end
 
-local _protected = nil
-local function buildProtected()
-    if _protected then return end
-    _protected = { ["minecraft:bone_meal"] = true }
-    for name, _ in pairs(Crop.allSeeds()) do
-        _protected[name] = true
-    end
-end
-local function isProtected(name)
-    buildProtected()
-    return _protected[name] == true
-end
+-- Mínimo de cada tipo de semilla que la turtle retiene para replantar.
+-- El exceso se deposita. replenishSeeds() recupera más del cofre si bajan de 8.
+local MIN_SEED_RESERVE = 16
 
 -- ============================================================
 -- Helpers de cofre
@@ -142,12 +133,32 @@ local function faceChest()
     Movement.faceDir(CHEST_DIR_FACE[Config.CHEST_DIRECTION] or "south")
 end
 
+-- Decide si un slot debe depositarse.
+-- Reglas:
+--   - Fuel               → NO depositar (la turtle lo necesita)
+--   - Bone meal          → NO depositar (consumible de farmeo)
+--   - Semilla pura       → depositar el EXCESO sobre MIN_SEED_RESERVE
+--       (Ej: wheat_seeds: guardar 16, depositar el resto)
+--   - Semilla+cosecha    → depositar el EXCESO sobre MIN_SEED_RESERVE
+--       (Ej: carrot/potato: guardar 16 para replantar, depositar el resto)
+--   - Cosecha normal     → siempre depositar (wheat, beetroot, etc.)
+local function shouldDeposit(itemName, slot)
+    if isItemFuel(slot) then return false end
+    if itemName == "minecraft:bone_meal" then return false end
+    local seeds = Crop.allSeeds()
+    if seeds[itemName] then
+        -- Es semilla (puede ser también cosecha): depositar solo el exceso
+        return countItem(itemName) > MIN_SEED_RESERVE
+    end
+    return true  -- cosecha pura → siempre depositar
+end
+
 local function depositCrops()
     faceChest()
     local count = 0
     for slot = 1, 16 do
         local d = turtle.getItemDetail(slot)
-        if d and not isProtected(d.name) and not isItemFuel(slot) then
+        if d and shouldDeposit(d.name, slot) then
             turtle.select(slot)
             if turtle.drop() then count = count + 1
             else Logger.warn("[Farmer] No se pudo depositar slot " .. slot) end

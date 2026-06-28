@@ -107,8 +107,11 @@ Config.STATE_FILE          = "data/state/miner.json"
 -- ============================================================
 -- LOGGING
 -- ============================================================
-Config.LOG_LEVEL = "INFO"
-Config.LOG_FILE  = "data/logs/miner.log"
+Config.LOG_LEVEL    = "INFO"
+Config.LOG_FILE     = "data/logs/miner.log"
+-- Tamaño máximo del log en bytes antes de rotarlo (borrar y empezar de nuevo).
+-- CC:Tweaked tiene ~1MB de disco por turtle; 40KB deja margen suficiente.
+Config.MAX_LOG_SIZE = 40000
 
 -- ============================================================
 -- FARMER (Farming Turtle)

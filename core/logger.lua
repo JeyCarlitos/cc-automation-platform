@@ -58,9 +58,22 @@ local function write(level, msg)
         print(line)
     end
 
-    -- Escribir a archivo
+    -- Escribir a archivo con rotación automática
     ensureLogDir()
-    local file = fs.open(Config.LOG_FILE, "a")
+    local logPath = Config.LOG_FILE
+    local maxSize = Config.MAX_LOG_SIZE or 40000
+
+    -- Si el log supera el límite, borrarlo y empezar de nuevo
+    if fs.exists(logPath) and fs.getSize(logPath) >= maxSize then
+        fs.delete(logPath)
+        local rot = fs.open(logPath, "w")
+        if rot then
+            rot.writeLine(string.format("[%s] [INFO ] --- Log rotado (superó %d bytes) ---", timestamp(), maxSize))
+            rot.close()
+        end
+    end
+
+    local file = fs.open(logPath, "a")
     if file then
         file.writeLine(line)
         file.close()
